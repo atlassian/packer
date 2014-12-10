@@ -111,8 +111,13 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			SSHConfig: SSHConfig(b.config.RunConfig.Comm.SSHUsername),
 		},
 		&common.StepProvision{},
-		&StepStopServer{},
-		&stepCreateImage{},
+	}
+
+	if !b.config.PackerDryRun {
+		steps = append(steps,
+			&StepStopServer{},
+			&stepCreateImage{},
+		)
 	}
 
 	// Run!
