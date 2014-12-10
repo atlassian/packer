@@ -19,11 +19,12 @@ type BuildCommand struct {
 }
 
 func (c BuildCommand) Run(args []string) int {
-	var cfgColor, cfgDebug, cfgForce, cfgParallel bool
+	var cfgColor, cfgDebug, cfgDryRun, cfgForce, cfgParallel bool
 	flags := c.Meta.FlagSet("build", FlagSetBuildFilter|FlagSetVars)
 	flags.Usage = func() { c.Ui.Say(c.Help()) }
 	flags.BoolVar(&cfgColor, "color", true, "")
 	flags.BoolVar(&cfgDebug, "debug", false, "")
+	flags.BoolVar(&cfgDryRun, "dry-run", false, "")
 	flags.BoolVar(&cfgForce, "force", false, "")
 	flags.BoolVar(&cfgParallel, "parallel", true, "")
 	if err := flags.Parse(args); err != nil {
@@ -71,6 +72,10 @@ func (c BuildCommand) Run(args []string) int {
 		c.Ui.Say("Debug mode enabled. Builds will not be parallelized.")
 	}
 
+	if cfgDryRun {
+		env.Ui().Say("Dry-run mode enabled. Images will be provisionned but not generated.")
+	}
+
 	// Compile all the UIs for the builds
 	colors := [5]packer.UiColor{
 		packer.UiColorGreen,
@@ -98,12 +103,14 @@ func (c BuildCommand) Run(args []string) int {
 	c.Ui.Say("")
 
 	log.Printf("Build debug mode: %v", cfgDebug)
+	log.Printf("Build dry-run mode: %v", cfgDryRun)
 	log.Printf("Force build: %v", cfgForce)
 
 	// Set the debug and force mode and prepare all the builds
 	for _, b := range builds {
 		log.Printf("Preparing build: %s", b.Name())
 		b.SetDebug(cfgDebug)
+		b.SetDryRun(cfgDryRun)
 		b.SetForce(cfgForce)
 
 		warnings, err := b.Prepare()
@@ -282,6 +289,7 @@ Options:
   -color=false               Disable color output (on by default)
   -debug                     Debug mode enabled for builds
   -except=foo,bar,baz        Build all builds other than these
+  -dry-run                   Dry-run mode enabled for builds
   -force                     Force a build to continue if artifacts exist, deletes existing artifacts
   -machine-readable          Machine-readable output
   -only=foo,bar,baz          Only build the given builds by name
