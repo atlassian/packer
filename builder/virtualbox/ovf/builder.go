@@ -124,12 +124,17 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Commands: b.config.VBoxManagePost,
 			Ctx:      b.config.ctx,
 		},
-		&vboxcommon.StepExport{
-			Format:         b.config.Format,
-			OutputDir:      b.config.OutputDir,
-			ExportOpts:     b.config.ExportOpts.ExportOpts,
-			SkipNatMapping: b.config.SSHSkipNatMapping,
-		},
+	}
+
+	if !b.config.PackerDryRun {
+		steps = append(steps,
+			&vboxcommon.StepExport{
+				Format:         b.config.Format,
+				OutputDir:      b.config.OutputDir,
+				ExportOpts:     b.config.ExportOpts.ExportOpts,
+				SkipNatMapping: b.config.SSHSkipNatMapping,
+			},
+		)
 	}
 
 	// Run the steps.
