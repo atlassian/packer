@@ -133,8 +133,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 				OutputDir:      b.config.OutputDir,
 				ExportOpts:     b.config.ExportOpts.ExportOpts,
 				SkipNatMapping: b.config.SSHSkipNatMapping,
-			},
-		)
+			},)
 	}
 
 	// Run the steps.
