@@ -73,7 +73,7 @@ func (c BuildCommand) Run(args []string) int {
 	}
 
 	if cfgDryRun {
-		env.Ui().Say("Dry-run mode enabled. Images will be provisionned but not generated.")
+		c.Ui.Say("Dry-run mode enabled. Images will be provisionned but not generated.")
 	}
 
 	// Compile all the UIs for the builds
