@@ -69,7 +69,11 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		new(common.StepProvision),
 		new(stepShutdown),
 		new(stepPowerOff),
-		new(stepSnapshot),
+	}
+
+	if !b.config.PackerDryRun {
+		steps = append(steps,
+			new(stepSnapshot))
 	}
 
 	// Run the steps

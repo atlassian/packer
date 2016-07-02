@@ -56,16 +56,18 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		&common.StepProvision{},
 	}
 
-	if b.config.Discard {
-		log.Print("[DEBUG] Container will be discarded")
-	} else if b.config.Commit {
-		log.Print("[DEBUG] Container will be committed")
-		steps = append(steps, new(StepCommit))
-	} else if b.config.ExportPath != "" {
-		log.Printf("[DEBUG] Container will be exported to %s", b.config.ExportPath)
-		steps = append(steps, new(StepExport))
-	} else {
-		return nil, errArtifactNotUsed
+	if !b.config.PackerDryRun {
+		if b.config.Discard {
+			log.Print("[DEBUG] Container will be discarded")
+		} else if b.config.Commit {
+			log.Print("[DEBUG] Container will be committed")
+			steps = append(steps, new(StepCommit))
+		} else if b.config.ExportPath != "" {
+			log.Printf("[DEBUG] Container will be exported to %s", b.config.ExportPath)
+			steps = append(steps, new(StepExport))
+		} else {
+			return nil, errArtifactNotUsed
+		}
 	}
 
 	// Setup the state bag and initial state for the steps
