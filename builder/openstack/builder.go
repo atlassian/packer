@@ -121,7 +121,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		steps = append(steps,
 			&stepCreateImage{},
 			&stepUpdateImageVisibility{},
-			&stepAddImageMembers{},)
+			&stepAddImageMembers{})
 	}
 
 	// Run!

@@ -178,38 +178,38 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	if !b.config.PackerDryRun {
 		steps = append(steps,
 			&awscommon.StepModifyEBSBackedInstance{
-			EnableEnhancedNetworking: b.config.AMIEnhancedNetworking,
-		},
-		&awscommon.StepDeregisterAMI{
-			ForceDeregister:     b.config.AMIForceDeregister,
-			ForceDeleteSnapshot: b.config.AMIForceDeleteSnapshot,
-			AMIName:             b.config.AMIName,
-		},
-		&stepCreateAMI{},
-		&awscommon.StepCreateEncryptedAMICopy{
-			KeyID:             b.config.AMIKmsKeyId,
-			EncryptBootVolume: b.config.AMIEncryptBootVolume,
-			Name:              b.config.AMIName,
-		},
-		&awscommon.StepAMIRegionCopy{
-			AccessConfig: &b.config.AccessConfig,
-			Regions:      b.config.AMIRegions,
-			Name:         b.config.AMIName,
-		},
-		&awscommon.StepModifyAMIAttributes{
-			Description:    b.config.AMIDescription,
-			Users:          b.config.AMIUsers,
-			Groups:         b.config.AMIGroups,
-			ProductCodes:   b.config.AMIProductCodes,
-			SnapshotUsers:  b.config.SnapshotUsers,
-			SnapshotGroups: b.config.SnapshotGroups,
-			Ctx:            b.config.ctx,
-		},
-		&awscommon.StepCreateTags{
-			Tags:         b.config.AMITags,
-			SnapshotTags: b.config.SnapshotTags,
-			Ctx:          b.config.ctx,
-		},)
+				EnableEnhancedNetworking: b.config.AMIEnhancedNetworking,
+			},
+			&awscommon.StepDeregisterAMI{
+				ForceDeregister:     b.config.AMIForceDeregister,
+				ForceDeleteSnapshot: b.config.AMIForceDeleteSnapshot,
+				AMIName:             b.config.AMIName,
+			},
+			&stepCreateAMI{},
+			&awscommon.StepCreateEncryptedAMICopy{
+				KeyID:             b.config.AMIKmsKeyId,
+				EncryptBootVolume: b.config.AMIEncryptBootVolume,
+				Name:              b.config.AMIName,
+			},
+			&awscommon.StepAMIRegionCopy{
+				AccessConfig: &b.config.AccessConfig,
+				Regions:      b.config.AMIRegions,
+				Name:         b.config.AMIName,
+			},
+			&awscommon.StepModifyAMIAttributes{
+				Description:    b.config.AMIDescription,
+				Users:          b.config.AMIUsers,
+				Groups:         b.config.AMIGroups,
+				ProductCodes:   b.config.AMIProductCodes,
+				SnapshotUsers:  b.config.SnapshotUsers,
+				SnapshotGroups: b.config.SnapshotGroups,
+				Ctx:            b.config.ctx,
+			},
+			&awscommon.StepCreateTags{
+				Tags:         b.config.AMITags,
+				SnapshotTags: b.config.SnapshotTags,
+				Ctx:          b.config.ctx,
+			})
 	}
 
 	// Run!
