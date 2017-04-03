@@ -44,6 +44,15 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 	err := config.Decode(&b.config, &config.DecodeOpts{
 		Interpolate:        true,
 		InterpolateContext: &b.config.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{
+				"ami_description",
+				"run_tags",
+				"run_volume_tags",
+				"snapshot_tags",
+				"tags",
+			},
+		},
 	}, raws...)
 	if err != nil {
 		return nil, err
@@ -70,7 +79,10 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		return nil, err
 	}
 
-	session := session.New(config)
+	session, err := session.NewSession(config)
+	if err != nil {
+		return nil, err
+	}
 	ec2conn := ec2.New(session)
 
 	// If the subnet is specified but not the AZ, try to determine the AZ automatically
@@ -100,9 +112,11 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		&awscommon.StepSourceAMIInfo{
 			SourceAmi:          b.config.SourceAmi,
 			EnhancedNetworking: b.config.AMIEnhancedNetworking,
+			AmiFilters:         b.config.SourceAmiFilter,
 		},
 		&awscommon.StepKeyPair{
 			Debug:                b.config.PackerDebug,
+			SSHAgentAuth:         b.config.Comm.SSHAgentAuth,
 			DebugKeyPath:         fmt.Sprintf("ec2_%s.pem", b.config.PackerBuildName),
 			KeyPairName:          b.config.SSHKeyPairName,
 			TemporaryKeyPairName: b.config.TemporaryKeyPairName,
@@ -132,9 +146,12 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			AvailabilityZone:         b.config.AvailabilityZone,
 			BlockDevices:             b.config.BlockDevices,
 			Tags:                     b.config.RunTags,
+			Ctx:                      b.config.ctx,
+			InstanceInitiatedShutdownBehavior: b.config.InstanceInitiatedShutdownBehavior,
 		},
-		&stepTagEBSVolumes{
+		&awscommon.StepTagEBSVolumes{
 			VolumeRunTags: b.config.VolumeRunTags,
+			Ctx:           b.config.ctx,
 		},
 		&awscommon.StepGetPassword{
 			Debug:   b.config.PackerDebug,
@@ -147,47 +164,56 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 				ec2conn,
 				b.config.SSHPrivateIp),
 			SSHConfig: awscommon.SSHConfig(
-				b.config.RunConfig.Comm.SSHUsername),
+				b.config.RunConfig.Comm.SSHAgentAuth,
+				b.config.RunConfig.Comm.SSHUsername,
+				b.config.RunConfig.Comm.SSHPassword),
 		},
 		&common.StepProvision{},
-		&stepStopInstance{SpotPrice: b.config.SpotPrice},
+		&awscommon.StepStopEBSBackedInstance{
+			SpotPrice:           b.config.SpotPrice,
+			DisableStopInstance: b.config.DisableStopInstance,
+		},
 	}
 
 	if !b.config.PackerDryRun {
 		steps = append(steps,
-			// TODO(mitchellh): verify works with spots
-			&stepModifyInstance{},
-			&awscommon.StepDeregisterAMI{
-				ForceDeregister: b.config.AMIForceDeregister,
-				AMIName:         b.config.AMIName,
-			},
-			&stepCreateAMI{},
-			&awscommon.StepAMIRegionCopy{
-				AccessConfig: &b.config.AccessConfig,
-				Regions:      b.config.AMIRegions,
-				Name:         b.config.AMIName,
-			},
-			&awscommon.StepModifyAMIAttributes{
-				Description:  b.config.AMIDescription,
-				Users:        b.config.AMIUsers,
-				Groups:       b.config.AMIGroups,
-				ProductCodes: b.config.AMIProductCodes,
-			},
-			&awscommon.StepCreateTags{
-				Tags: b.config.AMITags,
-			},)
+			&awscommon.StepModifyEBSBackedInstance{
+			EnableEnhancedNetworking: b.config.AMIEnhancedNetworking,
+		},
+		&awscommon.StepDeregisterAMI{
+			ForceDeregister:     b.config.AMIForceDeregister,
+			ForceDeleteSnapshot: b.config.AMIForceDeleteSnapshot,
+			AMIName:             b.config.AMIName,
+		},
+		&stepCreateAMI{},
+		&awscommon.StepCreateEncryptedAMICopy{
+			KeyID:             b.config.AMIKmsKeyId,
+			EncryptBootVolume: b.config.AMIEncryptBootVolume,
+			Name:              b.config.AMIName,
+		},
+		&awscommon.StepAMIRegionCopy{
+			AccessConfig: &b.config.AccessConfig,
+			Regions:      b.config.AMIRegions,
+			Name:         b.config.AMIName,
+		},
+		&awscommon.StepModifyAMIAttributes{
+			Description:    b.config.AMIDescription,
+			Users:          b.config.AMIUsers,
+			Groups:         b.config.AMIGroups,
+			ProductCodes:   b.config.AMIProductCodes,
+			SnapshotUsers:  b.config.SnapshotUsers,
+			SnapshotGroups: b.config.SnapshotGroups,
+			Ctx:            b.config.ctx,
+		},
+		&awscommon.StepCreateTags{
+			Tags:         b.config.AMITags,
+			SnapshotTags: b.config.SnapshotTags,
+			Ctx:          b.config.ctx,
+		},)
 	}
 
 	// Run!
-	if b.config.PackerDebug {
-		b.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		b.runner = &multistep.BasicRunner{Steps: steps}
-	}
-
+	b.runner = common.NewRunner(steps, b.config.PackerConfig, ui)
 	b.runner.Run(state)
 
 	// If there was an error, return that

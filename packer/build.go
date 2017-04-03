@@ -28,6 +28,12 @@ const (
 	// force build is enabled.
 	ForceConfigKey = "packer_force"
 
+	// This key determines what to do when a normal multistep step fails
+	// - "cleanup" - run cleanup steps
+	// - "abort" - exit without cleanup
+	// - "ask" - ask the user
+	OnErrorConfigKey = "packer_on_error"
+
 	// TemplatePathKey is the path to the template that configured this build
 	TemplatePathKey = "packer_template_path"
 
@@ -77,6 +83,12 @@ type Build interface {
 	// When SetForce is set to true, existing artifacts from the build are
 	// deleted prior to the build.
 	SetForce(bool)
+
+	// SetOnError will determine what to do when a normal multistep step fails
+	// - "cleanup" - run cleanup steps
+	// - "abort" - exit without cleanup
+	// - "ask" - ask the user
+	SetOnError(string)
 }
 
 // A build struct represents a single build job, the result of which should
@@ -97,6 +109,7 @@ type coreBuild struct {
 	debug         bool
 	dryRun        bool
 	force         bool
+	onError       string
 	l             sync.Mutex
 	prepareCalled bool
 }
@@ -141,6 +154,7 @@ func (b *coreBuild) Prepare() (warn []string, err error) {
 		DebugConfigKey:         b.debug,
 		DryRunConfigKey:        b.dryRun,
 		ForceConfigKey:         b.force,
+		OnErrorConfigKey:       b.onError,
 		TemplatePathKey:        b.templatePath,
 		UserVariablesConfigKey: b.variables,
 	}
@@ -324,6 +338,14 @@ func (b *coreBuild) SetForce(val bool) {
 	}
 
 	b.force = val
+}
+
+func (b *coreBuild) SetOnError(val string) {
+	if b.prepareCalled {
+		panic("prepare has already been called")
+	}
+
+	b.onError = val
 }
 
 // Cancels the build if it is running.

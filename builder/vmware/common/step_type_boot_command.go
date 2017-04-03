@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/mitchellh/go-vnc"
 	"github.com/mitchellh/multistep"
+	"github.com/mitchellh/packer/common"
 	"github.com/mitchellh/packer/packer"
 	"github.com/mitchellh/packer/template/interpolate"
 )
@@ -40,11 +42,18 @@ type StepTypeBootCommand struct {
 }
 
 func (s *StepTypeBootCommand) Run(state multistep.StateBag) multistep.StepAction {
+	debug := state.Get("debug").(bool)
 	driver := state.Get("driver").(Driver)
 	httpPort := state.Get("http_port").(uint)
 	ui := state.Get("ui").(packer.Ui)
 	vncIp := state.Get("vnc_ip").(string)
 	vncPort := state.Get("vnc_port").(uint)
+	vncPassword := state.Get("vnc_password")
+
+	var pauseFn multistep.DebugPauseFn
+	if debug {
+		pauseFn = state.Get("pauseFn").(multistep.DebugPauseFn)
+	}
 
 	// Connect to VNC
 	ui.Say("Connecting to VM via VNC")
@@ -57,7 +66,15 @@ func (s *StepTypeBootCommand) Run(state multistep.StateBag) multistep.StepAction
 	}
 	defer nc.Close()
 
-	c, err := vnc.Client(nc, &vnc.ClientConfig{Exclusive: false})
+	var auth []vnc.ClientAuth
+
+	if vncPassword != nil && len(vncPassword.(string)) > 0 {
+		auth = []vnc.ClientAuth{&vnc.PasswordAuth{Password: vncPassword.(string)}}
+	} else {
+		auth = []vnc.ClientAuth{new(vnc.ClientAuthNone)}
+	}
+
+	c, err := vnc.Client(nc, &vnc.ClientConfig{Auth: auth, Exclusive: true})
 	if err != nil {
 		err := fmt.Errorf("Error handshaking with VNC: %s", err)
 		state.Put("error", err)
@@ -78,7 +95,7 @@ func (s *StepTypeBootCommand) Run(state multistep.StateBag) multistep.StepAction
 		ipFinder = &IfconfigIPFinder{Device: "vmnet8"}
 	}
 
-	hostIp, err := ipFinder.HostIP()
+	hostIP, err := ipFinder.HostIP()
 	if err != nil {
 		err := fmt.Errorf("Error detecting host IP: %s", err)
 		state.Put("error", err)
@@ -86,16 +103,17 @@ func (s *StepTypeBootCommand) Run(state multistep.StateBag) multistep.StepAction
 		return multistep.ActionHalt
 	}
 
-	log.Printf("Host IP for the VMware machine: %s", hostIp)
+	log.Printf("Host IP for the VMware machine: %s", hostIP)
+	common.SetHTTPIP(hostIP)
 
 	s.Ctx.Data = &bootCommandTemplateData{
-		hostIp,
+		hostIP,
 		httpPort,
 		s.VMName,
 	}
 
 	ui.Say("Typing the boot command over VNC...")
-	for _, command := range s.BootCommand {
+	for i, command := range s.BootCommand {
 		command, err := interpolate.Render(command, &s.Ctx)
 		if err != nil {
 			err := fmt.Errorf("Error preparing boot command: %s", err)
@@ -108,6 +126,10 @@ func (s *StepTypeBootCommand) Run(state multistep.StateBag) multistep.StepAction
 		// since this isn't the fastest thing.
 		if _, ok := state.GetOk(multistep.StateCancelled); ok {
 			return multistep.ActionHalt
+		}
+
+		if pauseFn != nil {
+			pauseFn(multistep.DebugLocationAfterRun, fmt.Sprintf("boot_command[%d]: %s", i, command), state)
 		}
 
 		vncSendString(c, command)
@@ -149,13 +171,158 @@ func vncSendString(c *vnc.ClientConn, original string) {
 	special["<end>"] = 0xFF57
 	special["<pageUp>"] = 0xFF55
 	special["<pageDown>"] = 0xFF56
+	special["<leftAlt>"] = 0xFFE9
+	special["<leftCtrl>"] = 0xFFE3
+	special["<leftShift>"] = 0xFFE1
+	special["<rightAlt>"] = 0xFFEA
+	special["<rightCtrl>"] = 0xFFE4
+	special["<rightShift>"] = 0xFFE2
 
 	shiftedChars := "~!@#$%^&*()_+{}|:\"<>?"
+
+	// We delay (default 100ms) between each key event to allow for CPU or
+	// network latency. See PackerKeyEnv for tuning.
+	keyInterval := common.PackerKeyDefault
+	if delay, err := time.ParseDuration(os.Getenv(common.PackerKeyEnv)); err == nil {
+		keyInterval = delay
+	}
 
 	// TODO(mitchellh): Ripe for optimizations of some point, perhaps.
 	for len(original) > 0 {
 		var keyCode uint32
 		keyShift := false
+
+		if strings.HasPrefix(original, "<leftAltOn>") {
+			keyCode = special["<leftAlt>"]
+			original = original[len("<leftAltOn>"):]
+			log.Printf("Special code '<leftAltOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftCtrlOn>") {
+			keyCode = special["<leftCtrl>"]
+			original = original[len("<leftCtrlOn>"):]
+			log.Printf("Special code '<leftCtrlOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftShiftOn>") {
+			keyCode = special["<leftShift>"]
+			original = original[len("<leftShiftOn>"):]
+			log.Printf("Special code '<leftShiftOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftAltOff>") {
+			keyCode = special["<leftAlt>"]
+			original = original[len("<leftAltOff>"):]
+			log.Printf("Special code '<leftAltOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftCtrlOff>") {
+			keyCode = special["<leftCtrl>"]
+			original = original[len("<leftCtrlOff>"):]
+			log.Printf("Special code '<leftCtrlOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftShiftOff>") {
+			keyCode = special["<leftShift>"]
+			original = original[len("<leftShiftOff>"):]
+			log.Printf("Special code '<leftShiftOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightAltOn>") {
+			keyCode = special["<rightAlt>"]
+			original = original[len("<rightAltOn>"):]
+			log.Printf("Special code '<rightAltOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightCtrlOn>") {
+			keyCode = special["<rightCtrl>"]
+			original = original[len("<rightCtrlOn>"):]
+			log.Printf("Special code '<rightCtrlOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightShiftOn>") {
+			keyCode = special["<rightShift>"]
+			original = original[len("<rightShiftOn>"):]
+			log.Printf("Special code '<rightShiftOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightAltOff>") {
+			keyCode = special["<rightAlt>"]
+			original = original[len("<rightAltOff>"):]
+			log.Printf("Special code '<rightAltOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightCtrlOff>") {
+			keyCode = special["<rightCtrl>"]
+			original = original[len("<rightCtrlOff>"):]
+			log.Printf("Special code '<rightCtrlOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightShiftOff>") {
+			keyCode = special["<rightShift>"]
+			original = original[len("<rightShiftOff>"):]
+			log.Printf("Special code '<rightShiftOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+
+			continue
+		}
 
 		if strings.HasPrefix(original, "<wait>") {
 			log.Printf("Special code '<wait>' found, sleeping one second")
@@ -200,13 +367,10 @@ func vncSendString(c *vnc.ClientConn, original string) {
 			c.KeyEvent(KeyLeftShift, true)
 		}
 
-		// Send the key events. We add a 100ms sleep after each key event
-		// to deal with network latency and the OS responding to the keystroke.
-		// It is kind of arbitrary but it is better than nothing.
 		c.KeyEvent(keyCode, true)
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(keyInterval)
 		c.KeyEvent(keyCode, false)
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(keyInterval)
 
 		if keyShift {
 			c.KeyEvent(KeyLeftShift, false)

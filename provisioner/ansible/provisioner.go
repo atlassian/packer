@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"golang.org/x/crypto/ssh"
 
@@ -51,6 +52,7 @@ type Config struct {
 	SSHHostKeyFile       string   `mapstructure:"ssh_host_key_file"`
 	SSHAuthorizedKeyFile string   `mapstructure:"ssh_authorized_key_file"`
 	SFTPCmd              string   `mapstructure:"sftp_command"`
+	UseSFTP              bool     `mapstructure:"use_sftp"`
 	inventoryFile        string
 }
 
@@ -105,6 +107,12 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 			log.Println(p.config.SSHHostKeyFile, "does not exist")
 			errs = packer.MultiErrorAppend(errs, err)
 		}
+	} else {
+		p.config.AnsibleEnvVars = append(p.config.AnsibleEnvVars, "ANSIBLE_HOST_KEY_CHECKING=False")
+	}
+
+	if !p.config.UseSFTP {
+		p.config.AnsibleEnvVars = append(p.config.AnsibleEnvVars, "ANSIBLE_SCP_IF_SSH=True")
 	}
 
 	if len(p.config.LocalPort) > 0 {
@@ -176,13 +184,11 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 	keyChecker := ssh.CertChecker{
 		UserKeyFallback: func(conn ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
 			if user := conn.User(); user != p.config.User {
-				ui.Say(fmt.Sprintf("%s is not a valid user", user))
-				return nil, errors.New("authentication failed")
+				return nil, errors.New(fmt.Sprintf("authentication failed: %s is not a valid user", user))
 			}
 
 			if !bytes.Equal(k.Marshal(), pubKey.Marshal()) {
-				ui.Say("unauthorized key")
-				return nil, errors.New("authentication failed")
+				return nil, errors.New("authentication failed: unauthorized key")
 			}
 
 			return nil, nil
@@ -191,7 +197,7 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 
 	config := &ssh.ServerConfig{
 		AuthLogCallback: func(conn ssh.ConnMetadata, method string, err error) {
-			ui.Say(fmt.Sprintf("authentication attempt from %s to %s as %s using %s", conn.RemoteAddr(), conn.LocalAddr(), conn.User(), method))
+			log.Printf("authentication attempt from %s to %s as %s using %s", conn.RemoteAddr(), conn.LocalAddr(), conn.User(), method)
 		},
 		PublicKeyCallback: keyChecker.Authenticate,
 		//NoClientAuth:      true,
@@ -234,7 +240,7 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 	p.adapter = newAdapter(p.done, localListener, config, p.config.SFTPCmd, ui, comm)
 
 	defer func() {
-		ui.Say("shutting down the SSH proxy")
+		log.Print("shutting down the SSH proxy")
 		close(p.done)
 		p.adapter.Shutdown()
 	}()
@@ -276,7 +282,7 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		}()
 	}
 
-	if err := p.executeAnsible(ui, comm, k.privKeyFile, !hostSigner.generated); err != nil {
+	if err := p.executeAnsible(ui, comm, k.privKeyFile); err != nil {
 		return fmt.Errorf("Error executing Ansible: %s", err)
 	}
 
@@ -293,7 +299,7 @@ func (p *Provisioner) Cancel() {
 	os.Exit(0)
 }
 
-func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator, privKeyFile string, checkHostKey bool) error {
+func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator, privKeyFile string) error {
 	playbook, _ := filepath.Abs(p.config.PlaybookFile)
 	inventory := p.config.inventoryFile
 	var envvars []string
@@ -312,8 +318,6 @@ func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator, pri
 	cmd.Env = os.Environ()
 	if len(envvars) > 0 {
 		cmd.Env = append(cmd.Env, envvars...)
-	} else if !checkHostKey {
-		cmd.Env = append(cmd.Env, "ANSIBLE_HOST_KEY_CHECKING=False")
 	}
 
 	stdout, err := cmd.StdoutPipe()
@@ -327,12 +331,21 @@ func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator, pri
 
 	wg := sync.WaitGroup{}
 	repeat := func(r io.ReadCloser) {
-		scanner := bufio.NewScanner(r)
-		for scanner.Scan() {
-			ui.Message(scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
-			ui.Error(err.Error())
+		reader := bufio.NewReader(r)
+		for {
+			line, err := reader.ReadString('\n')
+			if line != "" {
+				line = strings.TrimRightFunc(line, unicode.IsSpace)
+				ui.Message(line)
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				} else {
+					ui.Error(err.Error())
+					break
+				}
+			}
 		}
 		wg.Done()
 	}
@@ -340,7 +353,7 @@ func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator, pri
 	go repeat(stdout)
 	go repeat(stderr)
 
-	ui.Say(fmt.Sprintf("Executing Ansible: %s", strings.Join(cmd.Args, " ")))
+	log.Printf("Executing Ansible: %s", strings.Join(cmd.Args, " "))
 	cmd.Start()
 	wg.Wait()
 	err = cmd.Wait()
@@ -423,7 +436,6 @@ func newUserKey(pubKeyFile string) (*userKey, error) {
 
 type signer struct {
 	ssh.Signer
-	generated bool
 }
 
 func newSigner(privKeyFile string) (*signer, error) {
@@ -452,7 +464,6 @@ func newSigner(privKeyFile string) (*signer, error) {
 	if err != nil {
 		return nil, errors.New("Failed to extract private key from generated key pair")
 	}
-	signer.generated = true
 
 	return signer, nil
 }

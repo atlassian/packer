@@ -23,18 +23,21 @@ import (
 type guestOSTypeConfig struct {
 	executeCommand string
 	installCommand string
+	knifeCommand   string
 	stagingDir     string
 }
 
 var guestOSTypeConfigs = map[string]guestOSTypeConfig{
-	provisioner.UnixOSType: guestOSTypeConfig{
+	provisioner.UnixOSType: {
 		executeCommand: "{{if .Sudo}}sudo {{end}}chef-client --no-color -c {{.ConfigPath}} -j {{.JsonPath}}",
 		installCommand: "curl -L https://www.chef.io/chef/install.sh | {{if .Sudo}}sudo {{end}}bash",
+		knifeCommand:   "{{if .Sudo}}sudo {{end}}knife {{.Args}} {{.Flags}}",
 		stagingDir:     "/tmp/packer-chef-client",
 	},
-	provisioner.WindowsOSType: guestOSTypeConfig{
+	provisioner.WindowsOSType: {
 		executeCommand: "c:/opscode/chef/bin/chef-client.bat --no-color -c {{.ConfigPath}} -j {{.JsonPath}}",
 		installCommand: "powershell.exe -Command \"(New-Object System.Net.WebClient).DownloadFile('http://chef.io/chef/install.msi', 'C:\\Windows\\Temp\\chef.msi');Start-Process 'msiexec' -ArgumentList '/qb /i C:\\Windows\\Temp\\chef.msi' -NoNewWindow -Wait\"",
+		knifeCommand:   "c:/opscode/chef/bin/knife.bat {{.Args}} {{.Flags}}",
 		stagingDir:     "C:/Windows/Temp/packer-chef-client",
 	},
 }
@@ -51,6 +54,7 @@ type Config struct {
 	ExecuteCommand             string   `mapstructure:"execute_command"`
 	GuestOSType                string   `mapstructure:"guest_os_type"`
 	InstallCommand             string   `mapstructure:"install_command"`
+	KnifeCommand               string   `mapstructure:"knife_command"`
 	NodeName                   string   `mapstructure:"node_name"`
 	PreventSudo                bool     `mapstructure:"prevent_sudo"`
 	RunList                    []string `mapstructure:"run_list"`
@@ -93,6 +97,12 @@ type InstallChefTemplate struct {
 	Sudo bool
 }
 
+type KnifeTemplate struct {
+	Sudo  bool
+	Flags string
+	Args  string
+}
+
 func (p *Provisioner) Prepare(raws ...interface{}) error {
 	err := config.Decode(&p.config, &config.DecodeOpts{
 		Interpolate:        true,
@@ -101,6 +111,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 			Exclude: []string{
 				"execute_command",
 				"install_command",
+				"knife_command",
 			},
 		},
 	}, raws...)
@@ -138,6 +149,10 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 
 	if p.config.StagingDir == "" {
 		p.config.StagingDir = p.guestOSTypeConfig.stagingDir
+	}
+
+	if p.config.KnifeCommand == "" {
+		p.config.KnifeCommand = p.guestOSTypeConfig.knifeCommand
 	}
 
 	var errs *packer.MultiError
@@ -265,20 +280,25 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 
 	err = p.executeChef(ui, comm, configPath, jsonPath)
 
-	knifeConfigPath, err2 := p.createKnifeConfig(
-		ui, comm, nodeName, serverUrl, p.config.ClientKey, p.config.SslVerifyMode)
-	if err2 != nil {
-		return fmt.Errorf("Error creating knife config on node: %s", err2)
-	}
-	if !p.config.SkipCleanNode {
-		if err2 := p.cleanNode(ui, comm, nodeName, knifeConfigPath); err2 != nil {
-			return fmt.Errorf("Error cleaning up chef node: %s", err2)
-		}
-	}
+	if !(p.config.SkipCleanNode && p.config.SkipCleanClient) {
 
-	if !p.config.SkipCleanClient {
-		if err2 := p.cleanClient(ui, comm, nodeName, knifeConfigPath); err2 != nil {
-			return fmt.Errorf("Error cleaning up chef client: %s", err2)
+		knifeConfigPath, knifeErr := p.createKnifeConfig(
+			ui, comm, nodeName, serverUrl, p.config.ClientKey, p.config.SslVerifyMode)
+
+		if knifeErr != nil {
+			return fmt.Errorf("Error creating knife config on node: %s", knifeErr)
+		}
+
+		if !p.config.SkipCleanNode {
+			if err := p.cleanNode(ui, comm, nodeName, knifeConfigPath); err != nil {
+				return fmt.Errorf("Error cleaning up chef node: %s", err)
+			}
+		}
+
+		if !p.config.SkipCleanClient {
+			if err := p.cleanClient(ui, comm, nodeName, knifeConfigPath); err != nil {
+				return fmt.Errorf("Error cleaning up chef client: %s", err)
+			}
 		}
 	}
 
@@ -484,13 +504,18 @@ func (p *Provisioner) knifeExec(ui packer.Ui, comm packer.Communicator, node str
 		"-c", knifeConfigPath,
 	}
 
-	cmdText := fmt.Sprintf(
-		"knife %s %s", strings.Join(args, " "), strings.Join(flags, " "))
-	if !p.config.PreventSudo {
-		cmdText = "sudo " + cmdText
+	p.config.ctx.Data = &KnifeTemplate{
+		Sudo:  !p.config.PreventSudo,
+		Flags: strings.Join(flags, " "),
+		Args:  strings.Join(args, " "),
 	}
 
-	cmd := &packer.RemoteCmd{Command: cmdText}
+	command, err := interpolate.Render(p.config.KnifeCommand, &p.config.ctx)
+	if err != nil {
+		return err
+	}
+
+	cmd := &packer.RemoteCmd{Command: command}
 	if err := cmd.StartWithUi(comm, ui); err != nil {
 		return err
 	}
@@ -498,7 +523,7 @@ func (p *Provisioner) knifeExec(ui packer.Ui, comm packer.Communicator, node str
 		return fmt.Errorf(
 			"Non-zero exit status. See output above for more info.\n\n"+
 				"Command: %s",
-			cmdText)
+			command)
 	}
 
 	return nil

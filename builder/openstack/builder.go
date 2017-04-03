@@ -90,6 +90,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			UserData:         b.config.UserData,
 			UserDataFile:     b.config.UserDataFile,
 			ConfigDrive:      b.config.ConfigDrive,
+			InstanceMetadata: b.config.InstanceMetadata,
 		},
 		&StepGetPassword{
 			Debug: b.config.PackerDebug,
@@ -101,6 +102,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		&StepAllocateIp{
 			FloatingIpPool: b.config.FloatingIpPool,
 			FloatingIp:     b.config.FloatingIp,
+			ReuseIps:       b.config.ReuseIps,
 		},
 		&communicator.StepConnect{
 			Config: &b.config.RunConfig.Comm,
@@ -108,27 +110,22 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 				computeClient,
 				b.config.SSHInterface,
 				b.config.SSHIPVersion),
-			SSHConfig: SSHConfig(b.config.RunConfig.Comm.SSHUsername),
+			SSHConfig: SSHConfig(b.config.RunConfig.Comm.SSHUsername,
+				b.config.RunConfig.Comm.SSHPassword),
 		},
 		&common.StepProvision{},
+		&StepStopServer{},
 	}
 
 	if !b.config.PackerDryRun {
 		steps = append(steps,
-			&StepStopServer{},
-			&stepCreateImage{},)
+			&stepCreateImage{},
+			&stepUpdateImageVisibility{},
+			&stepAddImageMembers{},)
 	}
 
 	// Run!
-	if b.config.PackerDebug {
-		b.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		b.runner = &multistep.BasicRunner{Steps: steps}
-	}
-
+	b.runner = common.NewRunner(steps, b.config.PackerConfig, ui)
 	b.runner.Run(state)
 
 	// If there was an error, return that

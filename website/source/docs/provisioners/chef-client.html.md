@@ -71,6 +71,11 @@ configuration is actually required.
 -   `json` (object) - An arbitrary mapping of JSON that will be available as
     node attributes while running Chef.
 
+-   `knife_command` (string) - The command used to run Knife during node clean-up. This has
+    various [configuration template
+    variables](/docs/templates/configuration-templates.html) available. See
+    below for more information.
+
 -   `node_name` (string) - The name of the node to register with the
     Chef Server. This is optional and by default is packer-{{uuid}}.
 
@@ -194,7 +199,7 @@ This command can be customized using the `execute_command` configuration. As you
 can see from the default value above, the value of this configuration can
 contain various template variables, defined below:
 
--   `ConfigPath` - The path to the Chef configuration file. file.
+-   `ConfigPath` - The path to the Chef configuration file.
 -   `JsonPath` - The path to the JSON attributes file for the node.
 -   `Sudo` - A boolean of whether to `sudo` the command or not, depending on the
     value of the `prevent_sudo` configuration.
@@ -219,6 +224,37 @@ powershell.exe -Command "(New-Object System.Net.WebClient).DownloadFile('http://
 
 This command can be customized using the `install_command` configuration.
 
+## Knife Command
+
+By default, Packer uses the following command (broken across multiple lines for
+readability) to execute Chef:
+
+``` {.liquid}
+{{if .Sudo}}sudo {{end}}knife \
+  {{.Args}} \
+  {{.Flags}}
+```
+
+When guest_os_type is set to "windows", Packer uses the following command to
+execute Chef. The full path to Chef is required because the PATH environment
+variable changes don't immediately propogate to running processes.
+
+``` {.liquid}
+c:/opscode/chef/bin/knife.bat \
+  {{.Args}} \
+  {{.Flags}}
+```
+
+This command can be customized using the `knife_command` configuration. As you
+can see from the default value above, the value of this configuration can
+contain various template variables, defined below:
+
+-   `Args` - The command arguments that are getting passed to the Knife command.
+-   `Flags` - The command flags that are getting passed to the Knife command..
+-   `Sudo` - A boolean of whether to `sudo` the command or not, depending on the
+    value of the `prevent_sudo` configuration.
+
+
 ## Folder Permissions
 
 !&gt; The `chef-client` provisioner will chmod the directory with your Chef keys
@@ -231,7 +267,7 @@ directories, append a shell provisioner after Chef to modify them.
 
 ### Chef Client Local Mode
 
-The following example shows how to run the `chef-cilent` provisioner in local
+The following example shows how to run the `chef-client` provisioner in local
 mode, while passing a `run_list` using a variable.
 
 **Local environment variables**

@@ -9,6 +9,9 @@ azure_group_name=
 azure_storage_name=
 azure_subscription_id= # Derived from the account after login
 azure_tenant_id=       # Derived from the account after login
+location=
+azure_object_id=
+azureversion=
 
 showhelp() {
 	echo "azure-setup"
@@ -88,7 +91,7 @@ askSubscription() {
 
 askName() {
 	echo ""
-	echo "Choose a name for your resource group, storage account, and client"
+	echo "Choose a name for your resource group, storage account and client"
 	echo "client. This is arbitrary, but it must not already be in use by"
 	echo "any of those resources. ALPHANUMERIC ONLY. Ex: mypackerbuild"
 	echo -n "> "
@@ -113,9 +116,17 @@ askSecret() {
 	fi
 }
 
+askLocation() {
+	azure location list
+	echo ""
+	echo "Choose which region your resource group and storage account will be created."
+	echo -n "> "
+	read location
+}
+
 createResourceGroup() {
 	echo "==> Creating resource group"
-	azure group create -n $meta_name -l westus
+	azure group create -n $meta_name -l $location
 	if [ $? -eq 0 ]; then
 		azure_group_name=$meta_name
 	else
@@ -126,7 +137,7 @@ createResourceGroup() {
 
 createStorageAccount() {
 	echo "==> Creating storage account"
-	azure storage account create -g $meta_name -l westus --type LRS $meta_name
+	azure storage account create -g $meta_name -l $location --sku-name LRS --kind Storage $meta_name
 	if [ $? -eq 0 ]; then
 		azure_storage_name=$meta_name
 	else
@@ -144,9 +155,22 @@ createApplication() {
 	fi
 }
 
-createServicePrinciple() {
+createServicePrincipal() {
 	echo "==> Creating service principal"
-	azure ad sp create $azure_client_id
+	# Azure CLI 0.10.2 introduced a breaking change, where appId must be supplied with the -a switch
+	# prior version accepted appId as the only parameter without a switch
+	newer_syntax=false
+	IFS='.' read -ra azureversionsemver <<< "$azureversion"
+	if [ ${azureversionsemver[0]} -ge 0 ] && [ ${azureversionsemver[1]} -ge 10 ] && [ ${azureversionsemver[2]} -ge 2 ]; then	
+		newer_syntax=true
+	fi
+
+	if [ "${newer_syntax}" = true ]; then	
+		azure_object_id=$(azure ad sp create -a $azure_client_id --json | jq -r .objectId)
+	else 
+		azure_object_id=$(azure ad sp create $azure_client_id --json | jq -r .objectId)
+	fi
+
 	if [ $? -ne 0 ]; then
 		echo "Error creating service principal: $azure_client_id"
 		exit 1
@@ -155,7 +179,7 @@ createServicePrinciple() {
 
 createPermissions() {
 	echo "==> Creating permissions"
-	azure role assignment create -o "Owner" --spn http://$meta_name -c /subscriptions/$azure_subscription_id
+	azure role assignment create --objectId $azure_object_id -o "Owner" -c /subscriptions/$azure_subscription_id
 	# We want to use this more conservative scope but it does not work with the
 	# current implementation which uses temporary resource groups
 	# azure role assignment create --spn http://$meta_name -g $azure_group_name -o "API Management Service Contributor"
@@ -169,12 +193,15 @@ showConfigs() {
 	echo ""
 	echo "Use the following configuration for your packer template:"
 	echo ""
+	echo "{"
 	echo "      \"client_id\": \"$azure_client_id\","
 	echo "      \"client_secret\": \"$azure_client_secret\","
-	echo "      \"resource_group_name\": \"$azure_group_name\","
-	echo "      \"storage_account\": \"$azure_storage_name\","
+	echo "      \"object_id\": \"$azure_object_id\","
 	echo "      \"subscription_id\": \"$azure_subscription_id\","
 	echo "      \"tenant_id\": \"$azure_tenant_id\","
+	echo "      \"resource_group_name\": \"$azure_group_name\","
+	echo "      \"storage_account\": \"$azure_storage_name\","
+	echo "}"
 	echo ""
 }
 
@@ -187,6 +214,7 @@ setup() {
 	askSubscription
 	askName
 	askSecret
+	askLocation
 
 	# Some of the resources take a while to converge in the API. To make the
 	# script more reliable we'll add a sleep after we create each resource.
@@ -197,7 +225,7 @@ setup() {
 	sleep 5
 	createApplication
 	sleep 5
-	createServicePrinciple
+	createServicePrincipal
 	sleep 5
 	createPermissions
 

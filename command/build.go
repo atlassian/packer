@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/mitchellh/packer/helper/enumflag"
 	"github.com/mitchellh/packer/packer"
 	"github.com/mitchellh/packer/template"
 )
@@ -20,12 +21,15 @@ type BuildCommand struct {
 
 func (c BuildCommand) Run(args []string) int {
 	var cfgColor, cfgDebug, cfgDryRun, cfgForce, cfgParallel bool
+	var cfgOnError string
 	flags := c.Meta.FlagSet("build", FlagSetBuildFilter|FlagSetVars)
 	flags.Usage = func() { c.Ui.Say(c.Help()) }
 	flags.BoolVar(&cfgColor, "color", true, "")
 	flags.BoolVar(&cfgDebug, "debug", false, "")
 	flags.BoolVar(&cfgDryRun, "dry-run", false, "")
 	flags.BoolVar(&cfgForce, "force", false, "")
+	flagOnError := enumflag.New(&cfgOnError, "cleanup", "abort", "ask")
+	flags.Var(flagOnError, "on-error", "")
 	flags.BoolVar(&cfgParallel, "parallel", true, "")
 	if err := flags.Parse(args); err != nil {
 		return 1
@@ -93,18 +97,22 @@ func (c BuildCommand) Run(args []string) int {
 				Color: colors[i%len(colors)],
 				Ui:    ui,
 			}
+			if _, ok := c.Ui.(*packer.MachineReadableUi); !ok {
+				ui.Say(fmt.Sprintf("%s output will be in this color.", b))
+				if i+1 == len(buildNames) {
+					// Add a newline between the color output and the actual output
+					c.Ui.Say("")
+				}
+			}
 		}
 
 		buildUis[b] = ui
-		ui.Say(fmt.Sprintf("%s output will be in this color.", b))
 	}
-
-	// Add a newline between the color output and the actual output
-	c.Ui.Say("")
 
 	log.Printf("Build debug mode: %v", cfgDebug)
 	log.Printf("Build dry-run mode: %v", cfgDryRun)
 	log.Printf("Force build: %v", cfgForce)
+	log.Printf("On error: %v", cfgOnError)
 
 	// Set the debug and force mode and prepare all the builds
 	for _, b := range builds {
@@ -112,6 +120,7 @@ func (c BuildCommand) Run(args []string) int {
 		b.SetDebug(cfgDebug)
 		b.SetDryRun(cfgDryRun)
 		b.SetForce(cfgForce)
+		b.SetOnError(cfgOnError)
 
 		warnings, err := b.Prepare()
 		if err != nil {
@@ -290,9 +299,10 @@ Options:
   -debug                     Debug mode enabled for builds
   -except=foo,bar,baz        Build all builds other than these
   -dry-run                   Dry-run mode enabled for builds
+  -only=foo,bar,baz          Build only the specified builds
   -force                     Force a build to continue if artifacts exist, deletes existing artifacts
   -machine-readable          Machine-readable output
-  -only=foo,bar,baz          Only build the given builds by name
+  -on-error=[cleanup|abort|ask] If the build fails do: clean up (default), abort, or ask
   -parallel=false            Disable parallelization (on by default)
   -var 'key=value'           Variable for templates, can be used multiple times.
   -var-file=path             JSON file containing user variables.

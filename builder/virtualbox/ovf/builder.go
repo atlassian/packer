@@ -42,6 +42,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	// Set up the state.
 	state := new(multistep.BasicStateBag)
 	state.Put("config", b.config)
+	state.Put("debug", b.config.PackerDebug)
 	state.Put("driver", driver)
 	state.Put("cache", cache)
 	state.Put("hook", hook)
@@ -55,7 +56,8 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		},
 		new(vboxcommon.StepSuppressMessages),
 		&common.StepCreateFloppy{
-			Files: b.config.FloppyFiles,
+			Files:       b.config.FloppyConfig.FloppyFiles,
+			Directories: b.config.FloppyConfig.FloppyDirectories,
 		},
 		&common.StepHTTPServer{
 			HTTPDir:     b.config.HTTPDir,
@@ -68,17 +70,26 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			GuestAdditionsSHA256: b.config.GuestAdditionsSHA256,
 			Ctx:                  b.config.ctx,
 		},
+		&common.StepDownload{
+			Checksum:     b.config.Checksum,
+			ChecksumType: b.config.ChecksumType,
+			Description:  "OVF/OVA",
+			Extension:    "ova",
+			ResultKey:    "vm_path",
+			TargetPath:   b.config.TargetPath,
+			Url:          []string{b.config.SourcePath},
+		},
 		&StepImport{
 			Name:        b.config.VMName,
-			SourcePath:  b.config.SourcePath,
 			ImportFlags: b.config.ImportFlags,
 		},
 		&vboxcommon.StepAttachGuestAdditions{
 			GuestAdditionsMode: b.config.GuestAdditionsMode,
 		},
 		&vboxcommon.StepConfigureVRDP{
-			VRDPPortMin: b.config.VRDPPortMin,
-			VRDPPortMax: b.config.VRDPPortMax,
+			VRDPBindAddress: b.config.VRDPBindAddress,
+			VRDPPortMin:     b.config.VRDPPortMin,
+			VRDPPortMax:     b.config.VRDPPortMax,
 		},
 		new(vboxcommon.StepAttachFloppy),
 		&vboxcommon.StepForwardSSH{
@@ -102,9 +113,10 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		},
 		&communicator.StepConnect{
 			Config:    &b.config.SSHConfig.Comm,
-			Host:      vboxcommon.CommHost,
+			Host:      vboxcommon.CommHost(b.config.SSHConfig.Comm.SSHHost),
 			SSHConfig: vboxcommon.SSHConfigFunc(b.config.SSHConfig),
 			SSHPort:   vboxcommon.SSHPort,
+			WinRMPort: vboxcommon.SSHPort,
 		},
 		&vboxcommon.StepUploadVersion{
 			Path: b.config.VBoxVersionFile,
@@ -118,6 +130,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		&vboxcommon.StepShutdown{
 			Command: b.config.ShutdownCommand,
 			Timeout: b.config.ShutdownTimeout,
+			Delay:   b.config.PostShutdownDelay,
 		},
 		new(vboxcommon.StepRemoveDevices),
 		&vboxcommon.StepVBoxManage{
@@ -129,22 +142,17 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	if !b.config.PackerDryRun {
 		steps = append(steps,
 			&vboxcommon.StepExport{
-				Format:         b.config.Format,
-				OutputDir:      b.config.OutputDir,
-				ExportOpts:     b.config.ExportOpts.ExportOpts,
-				SkipNatMapping: b.config.SSHSkipNatMapping,
+				&vboxcommon.StepExport{
+					Format:         b.config.Format,
+					OutputDir:      b.config.OutputDir,
+					ExportOpts:     b.config.ExportOpts.ExportOpts,
+					SkipNatMapping: b.config.SSHSkipNatMapping,
+					SkipExport:     b.config.SkipExport,
 			},)
 	}
 
 	// Run the steps.
-	if b.config.PackerDebug {
-		b.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		b.runner = &multistep.BasicRunner{Steps: steps}
-	}
+	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
 	b.runner.Run(state)
 
 	// Report any errors.

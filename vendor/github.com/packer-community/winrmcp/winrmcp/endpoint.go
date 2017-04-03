@@ -6,11 +6,12 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/masterzen/winrm/winrm"
+	"github.com/masterzen/winrm"
 )
 
-func parseEndpoint(addr string, https bool, insecure bool, caCert []byte) (*winrm.Endpoint, error) {
+func parseEndpoint(addr string, https bool, insecure bool, caCert []byte, timeout time.Duration) (*winrm.Endpoint, error) {
 	var host string
 	var port int
 
@@ -23,7 +24,7 @@ func parseEndpoint(addr string, https bool, insecure bool, caCert []byte) (*winr
 	} else {
 		shost, sport, err := net.SplitHostPort(addr)
 		if err != nil {
-			return nil, errors.New(fmt.Sprintf("Couldn't convert \"%s\" to an address.", addr))
+			return nil, fmt.Errorf("Couldn't convert \"%s\" to an address.", addr)
 		}
 		host = shost
 		port, err = strconv.Atoi(sport)
@@ -37,6 +38,7 @@ func parseEndpoint(addr string, https bool, insecure bool, caCert []byte) (*winr
 		Port:     port,
 		HTTPS:    https,
 		Insecure: insecure,
-		CACert:   &caCert,
+		CACert:   caCert,
+		Timeout:  timeout,
 	}, nil
 }

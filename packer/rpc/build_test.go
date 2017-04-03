@@ -2,24 +2,26 @@ package rpc
 
 import (
 	"errors"
-	"github.com/mitchellh/packer/packer"
 	"reflect"
 	"testing"
+
+	"github.com/mitchellh/packer/packer"
 )
 
 var testBuildArtifact = &packer.MockArtifact{}
 
 type testBuild struct {
-	nameCalled      bool
-	prepareCalled   bool
-	prepareWarnings []string
-	runCalled       bool
-	runCache        packer.Cache
-	runUi           packer.Ui
-	setDebugCalled  bool
-	setDryRunCalled bool
-	setForceCalled  bool
-	cancelCalled    bool
+	nameCalled       bool
+	prepareCalled    bool
+	prepareWarnings  []string
+	runCalled        bool
+	runCache         packer.Cache
+	runUi            packer.Ui
+	setDebugCalled   bool
+	setDryRunCalled  bool
+	setForceCalled   bool
+	setOnErrorCalled bool
+	cancelCalled     bool
 
 	errRunResult bool
 }
@@ -56,6 +58,10 @@ func (b *testBuild) SetDryRun(bool) {
 
 func (b *testBuild) SetForce(bool) {
 	b.setForceCalled = true
+}
+
+func (b *testBuild) SetOnError(string) {
+	b.setOnErrorCalled = true
 }
 
 func (b *testBuild) Cancel() {
@@ -124,6 +130,12 @@ func TestBuild(t *testing.T) {
 	// Test SetForce
 	bClient.SetForce(true)
 	if !b.setForceCalled {
+		t.Fatal("should be called")
+	}
+
+	// Test SetOnError
+	bClient.SetOnError("ask")
+	if !b.setOnErrorCalled {
 		t.Fatal("should be called")
 	}
 

@@ -17,11 +17,12 @@ import (
 
 // AccessConfig is for common configuration related to AWS access
 type AccessConfig struct {
-	AccessKey   string `mapstructure:"access_key"`
-	SecretKey   string `mapstructure:"secret_key"`
-	RawRegion   string `mapstructure:"region"`
-	Token       string `mapstructure:"token"`
-	ProfileName string `mapstructure:"profile"`
+	AccessKey      string `mapstructure:"access_key"`
+	SecretKey      string `mapstructure:"secret_key"`
+	RawRegion      string `mapstructure:"region"`
+	SkipValidation bool   `mapstructure:"skip_region_validation"`
+	Token          string `mapstructure:"token"`
+	ProfileName    string `mapstructure:"profile"`
 }
 
 // Config returns a valid aws.Config object for access to AWS services, or
@@ -44,7 +45,6 @@ func (c *AccessConfig) Config() (*aws.Config, error) {
 			return nil, err
 		}
 	} else {
-		sess := session.New(config)
 		creds = credentials.NewChainCredentials([]credentials.Provider{
 			&credentials.StaticProvider{Value: credentials.Value{
 				AccessKeyID:     c.AccessKey,
@@ -54,7 +54,7 @@ func (c *AccessConfig) Config() (*aws.Config, error) {
 			&credentials.EnvProvider{},
 			&credentials.SharedCredentialsProvider{Filename: "", Profile: ""},
 			&ec2rolecreds.EC2RoleProvider{
-				Client: ec2metadata.New(sess),
+				Client: ec2metadata.New(session.New(config)),
 			},
 		})
 	}
@@ -65,8 +65,10 @@ func (c *AccessConfig) Config() (*aws.Config, error) {
 // the region from the instance metadata if possible.
 func (c *AccessConfig) Region() (string, error) {
 	if c.RawRegion != "" {
-		if valid := ValidateRegion(c.RawRegion); valid == false {
-			return "", fmt.Errorf("Not a valid region: %s", c.RawRegion)
+		if !c.SkipValidation {
+			if valid := ValidateRegion(c.RawRegion); valid == false {
+				return "", fmt.Errorf("Not a valid region: %s", c.RawRegion)
+			}
 		}
 		return c.RawRegion, nil
 	}
@@ -82,7 +84,7 @@ func (c *AccessConfig) Region() (string, error) {
 
 func (c *AccessConfig) Prepare(ctx *interpolate.Context) []error {
 	var errs []error
-	if c.RawRegion != "" {
+	if c.RawRegion != "" && !c.SkipValidation {
 		if valid := ValidateRegion(c.RawRegion); valid == false {
 			errs = append(errs, fmt.Errorf("Unknown region: %s", c.RawRegion))
 		}
