@@ -245,7 +245,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		&StepCopyFiles{},
 		&StepChrootProvision{},
 		&StepEarlyCleanup{},
-	}
+	)
 
 	if !b.config.PackerDryRun {
 		steps = append(steps,
