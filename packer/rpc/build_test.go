@@ -11,7 +11,6 @@ import (
 var testBuildArtifact = &packer.MockArtifact{}
 
 type testBuild struct {
-
 	nameCalled       bool
 	prepareCalled    bool
 	prepareWarnings  []string
@@ -19,7 +18,7 @@ type testBuild struct {
 	runCache         packer.Cache
 	runUi            packer.Ui
 	setDebugCalled   bool
-	setDryRunCalled bool
+	setDryRunCalled  bool
 	setForceCalled   bool
 	setOnErrorCalled bool
 	cancelCalled     bool

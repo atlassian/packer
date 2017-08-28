@@ -77,7 +77,7 @@ func (c BuildCommand) Run(args []string) int {
 	}
 
 	if cfgDryRun {
-		env.Ui().Say("Dry-run mode enabled. Images will be provisionned but not generated.")
+		c.Ui.Say("Dry-run mode enabled. Images will be provisionned but not generated.")
 	}
 
 	// Compile all the UIs for the builds
@@ -298,11 +298,8 @@ Options:
   -color=false               Disable color output (on by default)
   -debug                     Debug mode enabled for builds
   -except=foo,bar,baz        Build all builds other than these
-<<<<<<< HEAD
   -dry-run                   Dry-run mode enabled for builds
-=======
   -only=foo,bar,baz          Build only the specified builds
->>>>>>> master
   -force                     Force a build to continue if artifacts exist, deletes existing artifacts
   -machine-readable          Machine-readable output
   -on-error=[cleanup|abort|ask] If the build fails do: clean up (default), abort, or ask

@@ -282,7 +282,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 				Tags:         b.config.AMITags,
 				SnapshotTags: b.config.SnapshotTags,
 				Ctx:          b.config.ctx,
-			},)
+			})
 	}
 
 	// Run!
