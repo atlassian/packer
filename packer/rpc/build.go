@@ -1,8 +1,9 @@
 package rpc
 
 import (
-	"github.com/mitchellh/packer/packer"
 	"net/rpc"
+
+	"github.com/mitchellh/packer/packer"
 )
 
 // An implementation of packer.Build where the build is actually executed
@@ -85,6 +86,12 @@ func (b *build) SetForce(val bool) {
 	}
 }
 
+func (b *build) SetOnError(val string) {
+	if err := b.client.Call("Build.SetOnError", val, new(interface{})); err != nil {
+		panic(err)
+	}
+}
+
 func (b *build) Cancel() {
 	if err := b.client.Call("Build.Cancel", new(interface{}), new(interface{})); err != nil {
 		panic(err)
@@ -142,6 +149,11 @@ func (b *BuildServer) SetDryRun(val *bool, reply *interface{}) error {
 
 func (b *BuildServer) SetForce(val *bool, reply *interface{}) error {
 	b.build.SetForce(*val)
+	return nil
+}
+
+func (b *BuildServer) SetOnError(val *string, reply *interface{}) error {
+	b.build.SetOnError(*val)
 	return nil
 }
 

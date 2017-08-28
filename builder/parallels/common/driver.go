@@ -5,10 +5,11 @@ import (
 	"log"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
-// A driver is able to talk to Parallels and perform certain
+// Driver is the interface that talks to Parallels and performs certain
 // operations with it. Some of the operations on here may seem overly
 // specific, but they were built specifically in mind to handle features
 // of the Parallels builder for Packer, and to abstract differences in
@@ -19,7 +20,7 @@ type Driver interface {
 	CompactDisk(string) error
 
 	// Adds new CD/DVD drive to the VM and returns name of this device
-	DeviceAddCdRom(string, string) (string, error)
+	DeviceAddCDROM(string, string) (string, error)
 
 	// Get path to the first virtual disk image
 	DiskPath(string) (string, error)
@@ -37,7 +38,7 @@ type Driver interface {
 	Prlctl(...string) error
 
 	// Get the path to the Parallels Tools ISO for the given flavor.
-	ToolsIsoPath(string) (string, error)
+	ToolsISOPath(string) (string, error)
 
 	// Verify checks to make sure that this driver should function
 	// properly. If there is any indication the driver can't function,
@@ -54,18 +55,20 @@ type Driver interface {
 	SetDefaultConfiguration(string) error
 
 	// Finds the MAC address of the NIC nic0
-	Mac(string) (string, error)
+	MAC(string) (string, error)
 
 	// Finds the IP address of a VM connected that uses DHCP by its MAC address
-	IpAddress(string) (string, error)
+	IPAddress(string) (string, error)
 }
 
+// NewDriver returns a new driver implementation for this version of Parallels
+// Desktop, or an error if the driver couldn't be initialized.
 func NewDriver() (Driver, error) {
 	var drivers map[string]Driver
 	var prlctlPath string
 	var prlsrvctlPath string
 	var supportedVersions []string
-	dhcp_lease_file := "/Library/Preferences/Parallels/parallels_dhcp_leases"
+	DHCPLeaseFile := "/Library/Preferences/Parallels/parallels_dhcp_leases"
 
 	if runtime.GOOS != "darwin" {
 		return nil, fmt.Errorf(
@@ -95,22 +98,22 @@ func NewDriver() (Driver, error) {
 	drivers = map[string]Driver{
 		"11": &Parallels11Driver{
 			Parallels9Driver: Parallels9Driver{
-				PrlctlPath:      prlctlPath,
-				PrlsrvctlPath:   prlsrvctlPath,
-				dhcp_lease_file: dhcp_lease_file,
+				PrlctlPath:    prlctlPath,
+				PrlsrvctlPath: prlsrvctlPath,
+				dhcpLeaseFile: DHCPLeaseFile,
 			},
 		},
 		"10": &Parallels10Driver{
 			Parallels9Driver: Parallels9Driver{
-				PrlctlPath:      prlctlPath,
-				PrlsrvctlPath:   prlsrvctlPath,
-				dhcp_lease_file: dhcp_lease_file,
+				PrlctlPath:    prlctlPath,
+				PrlsrvctlPath: prlsrvctlPath,
+				dhcpLeaseFile: DHCPLeaseFile,
 			},
 		},
 		"9": &Parallels9Driver{
-			PrlctlPath:      prlctlPath,
-			PrlsrvctlPath:   prlsrvctlPath,
-			dhcp_lease_file: dhcp_lease_file,
+			PrlctlPath:    prlctlPath,
+			PrlsrvctlPath: prlsrvctlPath,
+			dhcpLeaseFile: DHCPLeaseFile,
 		},
 	}
 
@@ -123,6 +126,14 @@ func NewDriver() (Driver, error) {
 			return d, nil
 		}
 		supportedVersions = append(supportedVersions, v)
+	}
+
+	latestDriver := 11
+	version, _ := drivers[strconv.Itoa(latestDriver)].Version()
+	majVer, _ := strconv.Atoi(strings.SplitN(version, ".", 2)[0])
+	if majVer > latestDriver {
+		log.Printf("Your version of Parallels Desktop for Mac is %s, Packer will use driver for version %d.", version, latestDriver)
+		return drivers[strconv.Itoa(latestDriver)], nil
 	}
 
 	return nil, fmt.Errorf(

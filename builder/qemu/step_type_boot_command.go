@@ -12,8 +12,10 @@ import (
 
 	"github.com/mitchellh/go-vnc"
 	"github.com/mitchellh/multistep"
+	"github.com/mitchellh/packer/common"
 	"github.com/mitchellh/packer/packer"
 	"github.com/mitchellh/packer/template/interpolate"
+	"os"
 )
 
 const KeyLeftShift uint32 = 0xFFE1
@@ -38,9 +40,15 @@ type stepTypeBootCommand struct{}
 
 func (s *stepTypeBootCommand) Run(state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
+	debug := state.Get("debug").(bool)
 	httpPort := state.Get("http_port").(uint)
 	ui := state.Get("ui").(packer.Ui)
 	vncPort := state.Get("vnc_port").(uint)
+
+	var pauseFn multistep.DebugPauseFn
+	if debug {
+		pauseFn = state.Get("pauseFn").(multistep.DebugPauseFn)
+	}
 
 	// Connect to VNC
 	ui.Say("Connecting to VM via VNC")
@@ -64,15 +72,17 @@ func (s *stepTypeBootCommand) Run(state multistep.StateBag) multistep.StepAction
 
 	log.Printf("Connected to VNC desktop: %s", c.DesktopName)
 
+	hostIP := "10.0.2.2"
+	common.SetHTTPIP(hostIP)
 	ctx := config.ctx
 	ctx.Data = &bootCommandTemplateData{
-		"10.0.2.2",
+		hostIP,
 		httpPort,
 		config.VMName,
 	}
 
 	ui.Say("Typing the boot command over VNC...")
-	for _, command := range config.BootCommand {
+	for i, command := range config.BootCommand {
 		command, err := interpolate.Render(command, &ctx)
 		if err != nil {
 			err := fmt.Errorf("Error preparing boot command: %s", err)
@@ -85,6 +95,10 @@ func (s *stepTypeBootCommand) Run(state multistep.StateBag) multistep.StepAction
 		// since this isn't the fastest thing.
 		if _, ok := state.GetOk(multistep.StateCancelled); ok {
 			return multistep.ActionHalt
+		}
+
+		if pauseFn != nil {
+			pauseFn(multistep.DebugLocationAfterRun, fmt.Sprintf("boot_command[%d]: %s", i, command), state)
 		}
 
 		vncSendString(c, command)
@@ -126,13 +140,147 @@ func vncSendString(c *vnc.ClientConn, original string) {
 	special["<end>"] = 0xFF57
 	special["<pageUp>"] = 0xFF55
 	special["<pageDown>"] = 0xFF56
+	special["<leftAlt>"] = 0xFFE9
+	special["<leftCtrl>"] = 0xFFE3
+	special["<leftShift>"] = 0xFFE1
+	special["<rightAlt>"] = 0xFFEA
+	special["<rightCtrl>"] = 0xFFE4
+	special["<rightShift>"] = 0xFFE2
 
 	shiftedChars := "~!@#$%^&*()_+{}|:\"<>?"
+	waitRe := regexp.MustCompile(`^<wait([0-9hms]+)>`)
+
+	// We delay (default 100ms) between each key event to allow for CPU or
+	// network latency. See PackerKeyEnv for tuning.
+	keyInterval := common.PackerKeyDefault
+	if delay, err := time.ParseDuration(os.Getenv(common.PackerKeyEnv)); err == nil {
+		keyInterval = delay
+	}
 
 	// TODO(mitchellh): Ripe for optimizations of some point, perhaps.
 	for len(original) > 0 {
 		var keyCode uint32
 		keyShift := false
+
+		if strings.HasPrefix(original, "<leftAltOn>") {
+			keyCode = special["<leftAlt>"]
+			original = original[len("<leftAltOn>"):]
+			log.Printf("Special code '<leftAltOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftCtrlOn>") {
+			keyCode = special["<leftCtrl>"]
+			original = original[len("<leftCtrlOn>"):]
+			log.Printf("Special code '<leftCtrlOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftShiftOn>") {
+			keyCode = special["<leftShift>"]
+			original = original[len("<leftShiftOn>"):]
+			log.Printf("Special code '<leftShiftOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftAltOff>") {
+			keyCode = special["<leftAlt>"]
+			original = original[len("<leftAltOff>"):]
+			log.Printf("Special code '<leftAltOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftCtrlOff>") {
+			keyCode = special["<leftCtrl>"]
+			original = original[len("<leftCtrlOff>"):]
+			log.Printf("Special code '<leftCtrlOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<leftShiftOff>") {
+			keyCode = special["<leftShift>"]
+			original = original[len("<leftShiftOff>"):]
+			log.Printf("Special code '<leftShiftOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightAltOn>") {
+			keyCode = special["<rightAlt>"]
+			original = original[len("<rightAltOn>"):]
+			log.Printf("Special code '<rightAltOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightCtrlOn>") {
+			keyCode = special["<rightCtrl>"]
+			original = original[len("<rightCtrlOn>"):]
+			log.Printf("Special code '<rightCtrlOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightShiftOn>") {
+			keyCode = special["<rightShift>"]
+			original = original[len("<rightShiftOn>"):]
+			log.Printf("Special code '<rightShiftOn>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, true)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightAltOff>") {
+			keyCode = special["<rightAlt>"]
+			original = original[len("<rightAltOff>"):]
+			log.Printf("Special code '<rightAltOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightCtrlOff>") {
+			keyCode = special["<rightCtrl>"]
+			original = original[len("<rightCtrlOff>"):]
+			log.Printf("Special code '<rightCtrlOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+			continue
+		}
+
+		if strings.HasPrefix(original, "<rightShiftOff>") {
+			keyCode = special["<rightShift>"]
+			original = original[len("<rightShiftOff>"):]
+			log.Printf("Special code '<rightShiftOff>' found, replacing with: %d", keyCode)
+
+			c.KeyEvent(keyCode, false)
+			time.Sleep(keyInterval)
+			continue
+		}
 
 		if strings.HasPrefix(original, "<wait>") {
 			log.Printf("Special code '<wait>' found, sleeping one second")
@@ -155,16 +303,13 @@ func vncSendString(c *vnc.ClientConn, original string) {
 			continue
 		}
 
-		if strings.HasPrefix(original, "<wait") && strings.HasSuffix(original, ">") {
-			re := regexp.MustCompile(`<wait([0-9hms]+)>$`)
-			dstr := re.FindStringSubmatch(original)
-			if len(dstr) > 1 {
-				log.Printf("Special code %s found, sleeping", dstr[0])
-				if dt, err := time.ParseDuration(dstr[1]); err == nil {
-					time.Sleep(dt)
-					original = original[len(dstr[0]):]
-					continue
-				}
+		waitMatch := waitRe.FindStringSubmatch(original)
+		if len(waitMatch) > 1 {
+			log.Printf("Special code %s found, sleeping", waitMatch[0])
+			if dt, err := time.ParseDuration(waitMatch[1]); err == nil {
+				time.Sleep(dt)
+				original = original[len(waitMatch[0]):]
+				continue
 			}
 		}
 
@@ -191,15 +336,14 @@ func vncSendString(c *vnc.ClientConn, original string) {
 		}
 
 		c.KeyEvent(keyCode, true)
-		time.Sleep(time.Second / 10)
+		time.Sleep(keyInterval)
+
 		c.KeyEvent(keyCode, false)
-		time.Sleep(time.Second / 10)
+		time.Sleep(keyInterval)
 
 		if keyShift {
 			c.KeyEvent(KeyLeftShift, false)
 		}
-
-		// qemu is picky, so no matter what, wait a small period
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(keyInterval)
 	}
 }

@@ -9,5 +9,6 @@ type PackerConfig struct {
 	PackerDebug       bool              `mapstructure:"packer_debug"`
 	PackerDryRun      bool              `mapstructure:"packer_dry_run"`
 	PackerForce       bool              `mapstructure:"packer_force"`
+	PackerOnError     string            `mapstructure:"packer_on_error"`
 	PackerUserVars    map[string]string `mapstructure:"packer_user_variables"`
 }

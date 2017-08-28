@@ -1,11 +1,10 @@
 ---
-description: Learn how Packer fits in with the rest of the HashiCorp ecosystem of tools
 layout: intro
-next_title: 'Getting Started: Install Packer'
-next_url: '/intro/getting-started/setup.html'
-page_title: Packer and the HashiCorp Ecosystem
-prev_url: '/intro/platforms.html'
-...
+sidebar_current: intro-ecosystem
+page_title: Packer and the HashiCorp Ecosystem - Introduction
+description: |-
+  Learn how Packer fits in with the rest of the HashiCorp ecosystem of tools
+---
 
 # Packer and the HashiCorp Ecosystem
 
@@ -51,7 +50,7 @@ is fully configured with dependencies and service discovery pre-baked. This
 greatly reduces the risk of an unhealthy node in production due to configuration
 failure at runtime.
 
-[Serf](https://www.serfdom.io/?utm_source=packer&utm_campaign=HashicorpEcosystem) is
+[Serf](https://www.serf.io/?utm_source=packer&utm_campaign=HashicorpEcosystem) is
 a HashiCorp tool for cluster membership and failure detection. Consul uses
 Serf's gossip protocol as the foundation for service discovery.
 

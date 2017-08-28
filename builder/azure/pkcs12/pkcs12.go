@@ -30,23 +30,6 @@ type contentInfo struct {
 	Content     asn1.RawValue `asn1:"tag:0,explicit,optional"`
 }
 
-type encryptedData struct {
-	Version              int
-	EncryptedContentInfo encryptedContentInfo
-}
-
-type encryptedContentInfo struct {
-	ContentType                asn1.ObjectIdentifier
-	ContentEncryptionAlgorithm pkix.AlgorithmIdentifier
-	EncryptedContent           []byte `asn1:"tag:0,optional"`
-}
-
-func (i encryptedContentInfo) GetAlgorithm() pkix.AlgorithmIdentifier {
-	return i.ContentEncryptionAlgorithm
-}
-
-func (i encryptedContentInfo) GetData() []byte { return i.EncryptedContent }
-
 type safeBag struct {
 	Id         asn1.ObjectIdentifier
 	Value      asn1.RawValue     `asn1:"tag:0,explicit"`
@@ -200,7 +183,7 @@ func makeSalt(saltByteCount int) ([]byte, error) {
 //
 // derBytes is a DER encoded certificate.
 // privateKey is an RSA
-func Encode(derBytes []byte, privateKey interface{}, password string) (pfxBytes []byte, err error) {
+func Encode(derBytes []byte, privateKey interface{}, password string) ([]byte, error) {
 	secret, err := bmpString(password)
 	if err != nil {
 		return nil, ErrIncorrectPassword

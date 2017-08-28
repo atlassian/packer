@@ -1,20 +1,28 @@
 package googlecompute
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
+	"google.golang.org/api/compute/v1"
+
+	"github.com/mitchellh/packer/common"
 	"github.com/mitchellh/packer/packer"
 	"github.com/mitchellh/packer/version"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"golang.org/x/oauth2/jwt"
-	"google.golang.org/api/compute/v1"
-	"strings"
 )
 
 // driverGCE is a Driver implementation that actually talks to GCE.
@@ -27,7 +35,7 @@ type driverGCE struct {
 
 var DriverScopes = []string{"https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/devstorage.full_control"}
 
-func NewDriverGCE(ui packer.Ui, p string, a *accountFile) (Driver, error) {
+func NewDriverGCE(ui packer.Ui, p string, a *AccountFile) (Driver, error) {
 	var err error
 
 	var client *http.Client
@@ -51,15 +59,20 @@ func NewDriverGCE(ui packer.Ui, p string, a *accountFile) (Driver, error) {
 		// your service account.
 		client = conf.Client(oauth2.NoContext)
 	} else {
-		log.Printf("[INFO] Requesting Google token via GCE Service Role...")
-		client = &http.Client{
-			Transport: &oauth2.Transport{
-				// Fetch from Google Compute Engine's metadata server to retrieve
-				// an access token for the provided account.
-				// If no account is specified, "default" is used.
-				Source: google.ComputeTokenSource(""),
-			},
-		}
+		log.Printf("[INFO] Requesting Google token via GCE API Default Client Token Source...")
+		client, err = google.DefaultClient(oauth2.NoContext, DriverScopes...)
+		// The DefaultClient uses the DefaultTokenSource of the google lib.
+		// The DefaultTokenSource uses the "Application Default Credentials"
+		// It looks for credentials in the following places, preferring the first location found:
+		// 1. A JSON file whose path is specified by the
+		//    GOOGLE_APPLICATION_CREDENTIALS environment variable.
+		// 2. A JSON file in a location known to the gcloud command-line tool.
+		//    On Windows, this is %APPDATA%/gcloud/application_default_credentials.json.
+		//    On other systems, $HOME/.config/gcloud/application_default_credentials.json.
+		// 3. On Google App Engine it uses the appengine.AccessToken function.
+		// 4. On Google Compute Engine and Google App Engine Managed VMs, it fetches
+		//    credentials from the metadata server.
+		//    (In this final case any provided scopes are ignored.)
 	}
 
 	if err != nil {
@@ -84,30 +97,41 @@ func NewDriverGCE(ui packer.Ui, p string, a *accountFile) (Driver, error) {
 	}, nil
 }
 
-func (d *driverGCE) ImageExists(name string) bool {
-	_, err := d.service.Images.Get(d.projectId, name).Do()
-	// The API may return an error for reasons other than the image not
-	// existing, but this heuristic is sufficient for now.
-	return err == nil
-}
-
-func (d *driverGCE) CreateImage(name, description, zone, disk string) <-chan error {
-	image := &compute.Image{
+func (d *driverGCE) CreateImage(name, description, family, zone, disk string) (<-chan *Image, <-chan error) {
+	gce_image := &compute.Image{
 		Description: description,
 		Name:        name,
+		Family:      family,
 		SourceDisk:  fmt.Sprintf("%s%s/zones/%s/disks/%s", d.service.BasePath, d.projectId, zone, disk),
 		SourceType:  "RAW",
 	}
 
+	imageCh := make(chan *Image, 1)
 	errCh := make(chan error, 1)
-	op, err := d.service.Images.Insert(d.projectId, image).Do()
+	op, err := d.service.Images.Insert(d.projectId, gce_image).Do()
 	if err != nil {
 		errCh <- err
 	} else {
-		go waitForState(errCh, "DONE", d.refreshGlobalOp(op))
+		go func() {
+			err = waitForState(errCh, "DONE", d.refreshGlobalOp(op))
+			if err != nil {
+				close(imageCh)
+				errCh <- err
+				return
+			}
+			var image *Image
+			image, err = d.GetImageFromProject(d.projectId, name, false)
+			if err != nil {
+				close(imageCh)
+				errCh <- err
+				return
+			}
+			imageCh <- image
+			close(imageCh)
+		}()
 	}
 
-	return errCh
+	return imageCh, errCh
 }
 
 func (d *driverGCE) DeleteImage(name string) <-chan error {
@@ -142,6 +166,66 @@ func (d *driverGCE) DeleteDisk(zone, name string) (<-chan error, error) {
 	errCh := make(chan error, 1)
 	go waitForState(errCh, "DONE", d.refreshZoneOp(zone, op))
 	return errCh, nil
+}
+
+func (d *driverGCE) GetImage(name string, fromFamily bool) (*Image, error) {
+	projects := []string{d.projectId, "centos-cloud", "coreos-cloud", "debian-cloud", "google-containers", "opensuse-cloud", "rhel-cloud", "suse-cloud", "ubuntu-os-cloud", "windows-cloud", "gce-nvme"}
+	var errs error
+	for _, project := range projects {
+		image, err := d.GetImageFromProject(project, name, fromFamily)
+		if err != nil {
+			errs = packer.MultiErrorAppend(errs, err)
+		}
+		if image != nil {
+			return image, nil
+		}
+	}
+
+	return nil, fmt.Errorf(
+		"Could not find image, %s, in projects, %s: %s", name,
+		projects, errs)
+}
+
+func (d *driverGCE) GetImageFromProject(project, name string, fromFamily bool) (*Image, error) {
+	var (
+		image *compute.Image
+		err   error
+	)
+
+	if fromFamily {
+		image, err = d.service.Images.GetFromFamily(project, name).Do()
+	} else {
+		image, err = d.service.Images.Get(project, name).Do()
+	}
+
+	if err != nil {
+		return nil, err
+	} else if image == nil || image.SelfLink == "" {
+		return nil, fmt.Errorf("Image, %s, could not be found in project: %s", name, project)
+	} else {
+		return &Image{
+			Licenses:  image.Licenses,
+			Name:      image.Name,
+			ProjectId: project,
+			SelfLink:  image.SelfLink,
+			SizeGb:    image.DiskSizeGb,
+		}, nil
+	}
+}
+
+func (d *driverGCE) GetInstanceMetadata(zone, name, key string) (string, error) {
+	instance, err := d.service.Instances.Get(d.projectId, zone, name).Do()
+	if err != nil {
+		return "", err
+	}
+
+	for _, item := range instance.Metadata.Items {
+		if item.Key == key {
+			return *item.Value, nil
+		}
+	}
+
+	return "", fmt.Errorf("Instance metadata key, %s, not found.", key)
 }
 
 func (d *driverGCE) GetNatIP(zone, name string) (string, error) {
@@ -180,17 +264,26 @@ func (d *driverGCE) GetInternalIP(zone, name string) (string, error) {
 	return "", nil
 }
 
+func (d *driverGCE) GetSerialPortOutput(zone, name string) (string, error) {
+	output, err := d.service.Instances.GetSerialPortOutput(d.projectId, zone, name).Do()
+	if err != nil {
+		return "", err
+	}
+
+	return output.Contents, nil
+}
+
+func (d *driverGCE) ImageExists(name string) bool {
+	_, err := d.GetImageFromProject(d.projectId, name, false)
+	// The API may return an error for reasons other than the image not
+	// existing, but this heuristic is sufficient for now.
+	return err == nil
+}
+
 func (d *driverGCE) RunInstance(c *InstanceConfig) (<-chan error, error) {
 	// Get the zone
 	d.ui.Message(fmt.Sprintf("Loading zone: %s", c.Zone))
 	zone, err := d.service.Zones.Get(d.projectId, c.Zone).Do()
-	if err != nil {
-		return nil, err
-	}
-
-	// Get the image
-	d.ui.Message(fmt.Sprintf("Loading image: %s in project %s", c.Image.Name, c.Image.ProjectId))
-	image, err := d.getImage(c.Image)
 	if err != nil {
 		return nil, err
 	}
@@ -205,8 +298,11 @@ func (d *driverGCE) RunInstance(c *InstanceConfig) (<-chan error, error) {
 	// TODO(mitchellh): deprecation warnings
 
 	// Get the network
+	if c.NetworkProjectId == "" {
+		c.NetworkProjectId = d.projectId
+	}
 	d.ui.Message(fmt.Sprintf("Loading network: %s", c.Network))
-	network, err := d.service.Networks.Get(d.projectId, c.Network).Do()
+	network, err := d.service.Networks.Get(c.NetworkProjectId, c.Network).Do()
 	if err != nil {
 		return nil, err
 	}
@@ -223,28 +319,31 @@ func (d *driverGCE) RunInstance(c *InstanceConfig) (<-chan error, error) {
 	subnetworkSelfLink := ""
 	if c.Subnetwork != "" {
 		d.ui.Message(fmt.Sprintf("Loading subnetwork: %s for region: %s", c.Subnetwork, c.Region))
-		subnetwork, err := d.service.Subnetworks.Get(d.projectId, c.Region, c.Subnetwork).Do()
+		subnetwork, err := d.service.Subnetworks.Get(c.NetworkProjectId, c.Region, c.Subnetwork).Do()
 		if err != nil {
 			return nil, err
 		}
 		subnetworkSelfLink = subnetwork.SelfLink
 	}
 
-	// If given a regional ip, get it
-	accessconfig := compute.AccessConfig{
-		Name: "AccessConfig created by Packer",
-		Type: "ONE_TO_ONE_NAT",
-	}
-
-	if c.Address != "" {
-		d.ui.Message(fmt.Sprintf("Looking up address: %s", c.Address))
-		region_url := strings.Split(zone.Region, "/")
-		region := region_url[len(region_url)-1]
-		address, err := d.service.Addresses.Get(d.projectId, region, c.Address).Do()
-		if err != nil {
-			return nil, err
+	var accessconfig *compute.AccessConfig
+	// Use external IP if OmitExternalIP isn't set
+	if !c.OmitExternalIP {
+		accessconfig = &compute.AccessConfig{
+			Name: "AccessConfig created by Packer",
+			Type: "ONE_TO_ONE_NAT",
 		}
-		accessconfig.NatIP = address.Address
+
+		// If given a static IP, use it
+		if c.Address != "" {
+			region_url := strings.Split(zone.Region, "/")
+			region := region_url[len(region_url)-1]
+			address, err := d.service.Addresses.Get(d.projectId, region, c.Address).Do()
+			if err != nil {
+				return nil, err
+			}
+			accessconfig.NatIP = address.Address
+		}
 	}
 
 	// Build up the metadata
@@ -261,14 +360,14 @@ func (d *driverGCE) RunInstance(c *InstanceConfig) (<-chan error, error) {
 	instance := compute.Instance{
 		Description: c.Description,
 		Disks: []*compute.AttachedDisk{
-			&compute.AttachedDisk{
+			{
 				Type:       "PERSISTENT",
 				Mode:       "READ_WRITE",
 				Kind:       "compute#attachedDisk",
 				Boot:       true,
 				AutoDelete: false,
 				InitializeParams: &compute.AttachedDiskInitializeParams{
-					SourceImage: image.SelfLink,
+					SourceImage: c.Image.SelfLink,
 					DiskSizeGb:  c.DiskSizeGb,
 					DiskType:    fmt.Sprintf("zones/%s/diskTypes/%s", zone.Name, c.DiskType),
 				},
@@ -280,25 +379,20 @@ func (d *driverGCE) RunInstance(c *InstanceConfig) (<-chan error, error) {
 		},
 		Name: c.Name,
 		NetworkInterfaces: []*compute.NetworkInterface{
-			&compute.NetworkInterface{
-				AccessConfigs: []*compute.AccessConfig{
-					&accessconfig,
-				},
-				Network:    network.SelfLink,
-				Subnetwork: subnetworkSelfLink,
+			{
+				AccessConfigs: []*compute.AccessConfig{accessconfig},
+				Network:       network.SelfLink,
+				Subnetwork:    subnetworkSelfLink,
 			},
 		},
 		Scheduling: &compute.Scheduling{
-			Preemptible: c.Preemptible,
+			OnHostMaintenance: c.OnHostMaintenance,
+			Preemptible:       c.Preemptible,
 		},
 		ServiceAccounts: []*compute.ServiceAccount{
-			&compute.ServiceAccount{
-				Email: "default",
-				Scopes: []string{
-					"https://www.googleapis.com/auth/userinfo.email",
-					"https://www.googleapis.com/auth/compute",
-					"https://www.googleapis.com/auth/devstorage.full_control",
-				},
+			{
+				Email:  c.ServiceAccountEmail,
+				Scopes: c.Scopes,
 			},
 		},
 		Tags: &compute.Tags{
@@ -317,24 +411,116 @@ func (d *driverGCE) RunInstance(c *InstanceConfig) (<-chan error, error) {
 	return errCh, nil
 }
 
+func (d *driverGCE) CreateOrResetWindowsPassword(instance, zone string, c *WindowsPasswordConfig) (<-chan error, error) {
+
+	errCh := make(chan error, 1)
+	go d.createWindowsPassword(errCh, instance, zone, c)
+
+	return errCh, nil
+}
+
+func (d *driverGCE) createWindowsPassword(errCh chan<- error, name, zone string, c *WindowsPasswordConfig) {
+
+	data, err := json.Marshal(c)
+
+	if err != nil {
+		errCh <- err
+		return
+	}
+	dCopy := string(data)
+
+	instance, err := d.service.Instances.Get(d.projectId, zone, name).Do()
+	instance.Metadata.Items = append(instance.Metadata.Items, &compute.MetadataItems{Key: "windows-keys", Value: &dCopy})
+
+	op, err := d.service.Instances.SetMetadata(d.projectId, zone, name, &compute.Metadata{
+		Fingerprint: instance.Metadata.Fingerprint,
+		Items:       instance.Metadata.Items,
+	}).Do()
+
+	if err != nil {
+		errCh <- err
+		return
+	}
+
+	newErrCh := make(chan error, 1)
+	go waitForState(newErrCh, "DONE", d.refreshZoneOp(zone, op))
+
+	select {
+	case err = <-newErrCh:
+	case <-time.After(time.Second * 30):
+		err = errors.New("time out while waiting for instance to create")
+	}
+
+	if err != nil {
+		errCh <- err
+		return
+	}
+
+	timeout := time.Now().Add(time.Minute * 3)
+	hash := sha1.New()
+	random := rand.Reader
+
+	for time.Now().Before(timeout) {
+		if passwordResponses, err := d.getPasswordResponses(zone, name); err == nil {
+			for _, response := range passwordResponses {
+				if response.Modulus == c.Modulus {
+
+					decodedPassword, err := base64.StdEncoding.DecodeString(response.EncryptedPassword)
+
+					if err != nil {
+						errCh <- err
+						return
+					}
+					password, err := rsa.DecryptOAEP(hash, random, c.key, decodedPassword, nil)
+
+					if err != nil {
+						errCh <- err
+						return
+					}
+
+					c.password = string(password)
+					errCh <- nil
+					return
+				}
+			}
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+	err = errors.New("Could not retrieve password. Timed out.")
+
+	errCh <- err
+	return
+
+}
+
+func (d *driverGCE) getPasswordResponses(zone, instance string) ([]windowsPasswordResponse, error) {
+	output, err := d.service.Instances.GetSerialPortOutput(d.projectId, zone, instance).Port(4).Do()
+
+	if err != nil {
+		return nil, err
+	}
+
+	responses := strings.Split(output.Contents, "\n")
+
+	passwordResponses := make([]windowsPasswordResponse, 0, len(responses))
+
+	for _, response := range responses {
+		var passwordResponse windowsPasswordResponse
+		if err := json.Unmarshal([]byte(response), &passwordResponse); err != nil {
+			continue
+		}
+
+		passwordResponses = append(passwordResponses, passwordResponse)
+	}
+
+	return passwordResponses, nil
+}
+
 func (d *driverGCE) WaitForInstance(state, zone, name string) <-chan error {
 	errCh := make(chan error, 1)
 	go waitForState(errCh, state, d.refreshInstanceState(zone, name))
 	return errCh
-}
-
-func (d *driverGCE) getImage(img Image) (image *compute.Image, err error) {
-	projects := []string{img.ProjectId, "centos-cloud", "coreos-cloud", "debian-cloud", "google-containers", "opensuse-cloud", "rhel-cloud", "suse-cloud", "ubuntu-os-cloud", "windows-cloud"}
-	for _, project := range projects {
-		image, err = d.service.Images.Get(project, img.Name).Do()
-		if err == nil && image != nil && image.SelfLink != "" {
-			return
-		}
-		image = nil
-	}
-
-	err = fmt.Errorf("Image %s could not be found in any of these projects: %s", img.Name, projects)
-	return
 }
 
 func (d *driverGCE) refreshInstanceState(zone, name string) stateRefreshFunc {
@@ -395,18 +581,16 @@ type stateRefreshFunc func() (string, error)
 
 // waitForState will spin in a loop forever waiting for state to
 // reach a certain target.
-func waitForState(errCh chan<- error, target string, refresh stateRefreshFunc) {
-	for {
+func waitForState(errCh chan<- error, target string, refresh stateRefreshFunc) error {
+	err := common.Retry(2, 2, 0, func() (bool, error) {
 		state, err := refresh()
 		if err != nil {
-			errCh <- err
-			return
+			return false, err
+		} else if state == target {
+			return true, nil
 		}
-		if state == target {
-			errCh <- nil
-			return
-		}
-
-		time.Sleep(2 * time.Second)
-	}
+		return false, nil
+	})
+	errCh <- err
+	return err
 }

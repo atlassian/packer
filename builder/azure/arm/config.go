@@ -13,24 +13,24 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math/big"
-	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/arm/compute"
+	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
-	"github.com/Azure/go-ntlmssp"
+	"github.com/masterzen/winrm"
+
 	"github.com/mitchellh/packer/builder/azure/common/constants"
 	"github.com/mitchellh/packer/builder/azure/pkcs12"
-
 	"github.com/mitchellh/packer/common"
 	"github.com/mitchellh/packer/helper/communicator"
 	"github.com/mitchellh/packer/helper/config"
 	"github.com/mitchellh/packer/packer"
 	"github.com/mitchellh/packer/template/interpolate"
 
-	"github.com/Azure/go-autorest/autorest/azure"
 	"golang.org/x/crypto/ssh"
-	"strings"
 )
 
 const (
@@ -38,6 +38,11 @@ const (
 	DefaultImageVersion         = "latest"
 	DefaultUserName             = "packer"
 	DefaultVMSize               = "Standard_A1"
+)
+
+var (
+	reCaptureContainerName = regexp.MustCompile("^[a-z0-9][a-z0-9\\-]{2,62}$")
+	reCaptureNamePrefix    = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9_\\-\\.]{0,23}$")
 )
 
 type Config struct {
@@ -59,18 +64,28 @@ type Config struct {
 	ImageOffer     string `mapstructure:"image_offer"`
 	ImageSku       string `mapstructure:"image_sku"`
 	ImageVersion   string `mapstructure:"image_version"`
+	ImageUrl       string `mapstructure:"image_url"`
 	Location       string `mapstructure:"location"`
 	VMSize         string `mapstructure:"vm_size"`
 
 	// Deployment
-	ResourceGroupName          string `mapstructure:"resource_group_name"`
-	StorageAccount             string `mapstructure:"storage_account"`
-	storageAccountBlobEndpoint string
-	CloudEnvironmentName       string `mapstructure:"cloud_environment_name"`
-	cloudEnvironment           *azure.Environment
+	AzureTags                       map[string]*string `mapstructure:"azure_tags"`
+	ResourceGroupName               string             `mapstructure:"resource_group_name"`
+	StorageAccount                  string             `mapstructure:"storage_account"`
+	TempComputeName                 string             `mapstructure:"temp_compute_name"`
+	TempResourceGroupName           string             `mapstructure:"temp_resource_group_name"`
+	storageAccountBlobEndpoint      string
+	CloudEnvironmentName            string `mapstructure:"cloud_environment_name"`
+	cloudEnvironment                *azure.Environment
+	VirtualNetworkName              string `mapstructure:"virtual_network_name"`
+	VirtualNetworkSubnetName        string `mapstructure:"virtual_network_subnet_name"`
+	VirtualNetworkResourceGroupName string `mapstructure:"virtual_network_resource_group_name"`
+	CustomDataFile                  string `mapstructure:"custom_data_file"`
+	customData                      string
 
 	// OS
-	OSType string `mapstructure:"os_type"`
+	OSType       string `mapstructure:"os_type"`
+	OSDiskSizeGB int32  `mapstructure:"os_disk_size_gb"`
 
 	// Runtime Values
 	UserName               string
@@ -103,38 +118,6 @@ type keyVaultCertificate struct {
 	Password string `json:"password,omitempty"`
 }
 
-// If we ever feel the need to support more templates consider moving this
-// method to its own factory class.
-func (c *Config) toTemplateParameters() *TemplateParameters {
-	templateParameters := &TemplateParameters{
-		AdminUsername:              &TemplateParameter{c.UserName},
-		AdminPassword:              &TemplateParameter{c.Password},
-		DnsNameForPublicIP:         &TemplateParameter{c.tmpComputeName},
-		ImageOffer:                 &TemplateParameter{c.ImageOffer},
-		ImagePublisher:             &TemplateParameter{c.ImagePublisher},
-		ImageSku:                   &TemplateParameter{c.ImageSku},
-		ImageVersion:               &TemplateParameter{c.ImageVersion},
-		OSDiskName:                 &TemplateParameter{c.tmpOSDiskName},
-		StorageAccountBlobEndpoint: &TemplateParameter{c.storageAccountBlobEndpoint},
-		VMSize: &TemplateParameter{c.VMSize},
-		VMName: &TemplateParameter{c.tmpComputeName},
-	}
-
-	switch c.OSType {
-	case constants.Target_Linux:
-		templateParameters.SshAuthorizedKey = &TemplateParameter{c.sshAuthorizedKey}
-	case constants.Target_Windows:
-		templateParameters.TenantId = &TemplateParameter{c.TenantID}
-		templateParameters.ObjectId = &TemplateParameter{c.ObjectID}
-
-		templateParameters.KeyVaultName = &TemplateParameter{c.tmpKeyVaultName}
-		templateParameters.KeyVaultSecretValue = &TemplateParameter{c.winrmCertificate}
-		templateParameters.WinRMCertificateUrl = &TemplateParameter{c.tmpWinRMCertificateUrl}
-	}
-
-	return templateParameters
-}
-
 func (c *Config) toVirtualMachineCaptureParameters() *compute.VirtualMachineCaptureParameters {
 	return &compute.VirtualMachineCaptureParameters{
 		DestinationContainerName: &c.CaptureContainerName,
@@ -146,17 +129,17 @@ func (c *Config) toVirtualMachineCaptureParameters() *compute.VirtualMachineCapt
 func (c *Config) createCertificate() (string, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		err := fmt.Errorf("Failed to Generate Private Key: %s", err)
+		err = fmt.Errorf("Failed to Generate Private Key: %s", err)
 		return "", err
 	}
 
 	host := fmt.Sprintf("%s.cloudapp.net", c.tmpComputeName)
 	notBefore := time.Now()
-	notAfter := notBefore.Add(365 * 24 * time.Hour)
+	notAfter := notBefore.Add(24 * time.Hour)
 
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		err := fmt.Errorf("Failed to Generate Serial Number: %v", err)
+		err = fmt.Errorf("Failed to Generate Serial Number: %v", err)
 		return "", err
 	}
 
@@ -223,20 +206,33 @@ func newConfig(raws ...interface{}) (*Config, []string, error) {
 		return nil, nil, err
 	}
 
-	err = setSshValues(&c)
+	err = setCustomData(&c)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	err = setWinRMCertificate(&c)
-	if err != nil {
-		return nil, nil, err
+	// NOTE: if the user did not specify a communicator, then default to both
+	// SSH and WinRM.  This is for backwards compatibility because the code did
+	// not specifically force the user to set a communicator.
+	if c.Comm.Type == "" || strings.EqualFold(c.Comm.Type, "ssh") {
+		err = setSshValues(&c)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if c.Comm.Type == "" || strings.EqualFold(c.Comm.Type, "winrm") {
+		err = setWinRMCertificate(&c)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	var errs *packer.MultiError
 	errs = packer.MultiErrorAppend(errs, c.Comm.Prepare(c.ctx)...)
 
 	assertRequiredParametersSet(&c, errs)
+	assertTagProperties(&c, errs)
 	if errs != nil && len(errs.Errors) > 0 {
 		return nil, nil, errs
 	}
@@ -276,14 +272,13 @@ func setSshValues(c *Config) error {
 		c.sshPrivateKey = sshKeyPair.PrivateKey()
 	}
 
-	c.Comm.WinRMTransportDecorator = func(t *http.Transport) http.RoundTripper {
-		return &ntlmssp.Negotiator{RoundTripper: t}
-	}
-
 	return nil
 }
 
 func setWinRMCertificate(c *Config) error {
+	c.Comm.WinRMTransportDecorator =
+		func() winrm.Transporter { return &winrm.ClientNTLM{} }
+
 	cert, err := c.createCertificate()
 	c.winrmCertificate = cert
 
@@ -295,9 +290,17 @@ func setRuntimeValues(c *Config) {
 
 	c.tmpAdminPassword = tempName.AdminPassword
 	c.tmpCertificatePassword = tempName.CertificatePassword
-	c.tmpComputeName = tempName.ComputeName
+	if c.TempComputeName == "" {
+		c.tmpComputeName = tempName.ComputeName
+	} else {
+		c.tmpComputeName = c.TempComputeName
+	}
 	c.tmpDeploymentName = tempName.DeploymentName
-	c.tmpResourceGroupName = tempName.ResourceGroupName
+	if c.TempResourceGroupName == "" {
+		c.tmpResourceGroupName = tempName.ResourceGroupName
+	} else {
+		c.tmpResourceGroupName = c.TempResourceGroupName
+	}
 	c.tmpOSDiskName = tempName.OSDiskName
 	c.tmpKeyVaultName = tempName.KeyVaultName
 }
@@ -317,18 +320,50 @@ func setUserNamePassword(c *Config) {
 }
 
 func setCloudEnvironment(c *Config) error {
+	lookup := map[string]string{
+		"CHINA":           "AzureChinaCloud",
+		"CHINACLOUD":      "AzureChinaCloud",
+		"AZURECHINACLOUD": "AzureChinaCloud",
+
+		"GERMAN":           "AzureGermanCloud",
+		"GERMANCLOUD":      "AzureGermanCloud",
+		"AZUREGERMANCLOUD": "AzureGermanCloud",
+
+		"GERMANY":           "AzureGermanCloud",
+		"GERMANYCLOUD":      "AzureGermanCloud",
+		"AZUREGERMANYCLOUD": "AzureGermanCloud",
+
+		"PUBLIC":           "AzurePublicCloud",
+		"PUBLICCLOUD":      "AzurePublicCloud",
+		"AZUREPUBLICCLOUD": "AzurePublicCloud",
+
+		"USGOVERNMENT":           "AzureUSGovernmentCloud",
+		"USGOVERNMENTCLOUD":      "AzureUSGovernmentCloud",
+		"AZUREUSGOVERNMENTCLOUD": "AzureUSGovernmentCloud",
+	}
+
 	name := strings.ToUpper(c.CloudEnvironmentName)
-	switch name {
-	case "CHINA", "CHINACLOUD", "AZURECHINACLOUD":
-		c.cloudEnvironment = &azure.ChinaCloud
-	case "PUBLIC", "PUBLICCLOUD", "AZUREPUBLICCLOUD":
-		c.cloudEnvironment = &azure.PublicCloud
-	case "USGOVERNMENT", "USGOVERNMENTCLOUD", "AZUREUSGOVERNMENTCLOUD":
-		c.cloudEnvironment = &azure.USGovernmentCloud
-	default:
+	envName, ok := lookup[name]
+	if !ok {
 		return fmt.Errorf("There is no cloud envionment matching the name '%s'!", c.CloudEnvironmentName)
 	}
 
+	env, err := azure.EnvironmentFromName(envName)
+	c.cloudEnvironment = &env
+	return err
+}
+
+func setCustomData(c *Config) error {
+	if c.CustomDataFile == "" {
+		return nil
+	}
+
+	b, err := ioutil.ReadFile(c.CustomDataFile)
+	if err != nil {
+		return err
+	}
+
+	c.customData = base64.StdEncoding.EncodeToString(b)
 	return nil
 }
 
@@ -337,12 +372,27 @@ func provideDefaultValues(c *Config) {
 		c.VMSize = DefaultVMSize
 	}
 
-	if c.ImageVersion == "" {
+	if c.ImageUrl == "" && c.ImageVersion == "" {
 		c.ImageVersion = DefaultImageVersion
 	}
 
 	if c.CloudEnvironmentName == "" {
 		c.CloudEnvironmentName = DefaultCloudEnvironmentName
+	}
+}
+
+func assertTagProperties(c *Config, errs *packer.MultiError) {
+	if len(c.AzureTags) > 15 {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("a max of 15 tags are supported, but %d were provided", len(c.AzureTags)))
+	}
+
+	for k, v := range c.AzureTags {
+		if len(k) > 512 {
+			errs = packer.MultiErrorAppend(errs, fmt.Errorf("the tag name %q exceeds (%d) the 512 character limit", k, len(k)))
+		}
+		if len(*v) > 256 {
+			errs = packer.MultiErrorAppend(errs, fmt.Errorf("the tag name %q exceeds (%d) the 256 character limit", v, len(*v)))
+		}
 	}
 }
 
@@ -380,10 +430,6 @@ func assertRequiredParametersSet(c *Config, errs *packer.MultiError) {
 			errs = packer.MultiErrorAppend(errs, fmt.Errorf("A client_secret must be specified"))
 		}
 
-		if c.TenantID == "" {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("A tenant_id must be specified"))
-		}
-
 		if c.SubscriptionID == "" {
 			errs = packer.MultiErrorAppend(errs, fmt.Errorf("A subscription_id must be specified"))
 		}
@@ -392,25 +438,51 @@ func assertRequiredParametersSet(c *Config, errs *packer.MultiError) {
 	/////////////////////////////////////////////
 	// Capture
 	if c.CaptureContainerName == "" {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("An capture_container_name must be specified"))
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A capture_container_name must be specified"))
+	}
+
+	if !reCaptureContainerName.MatchString(c.CaptureContainerName) {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A capture_container_name must satisfy the regular expression %q.", reCaptureContainerName.String()))
+	}
+
+	if strings.HasSuffix(c.CaptureContainerName, "-") {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A capture_container_name must not end with a hyphen, e.g. '-'."))
+	}
+
+	if strings.Contains(c.CaptureContainerName, "--") {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A capture_container_name must not contain consecutive hyphens, e.g. '--'."))
 	}
 
 	if c.CaptureNamePrefix == "" {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("An capture_name_prefix must be specified"))
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A capture_name_prefix must be specified"))
+	}
+
+	if !reCaptureNamePrefix.MatchString(c.CaptureNamePrefix) {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A capture_name_prefix must satisfy the regular expression %q.", reCaptureNamePrefix.String()))
+	}
+
+	if strings.HasSuffix(c.CaptureNamePrefix, "-") || strings.HasSuffix(c.CaptureNamePrefix, ".") {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A capture_name_prefix must not end with a hyphen or period."))
 	}
 
 	/////////////////////////////////////////////
 	// Compute
-	if c.ImagePublisher == "" {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A image_publisher must be specified"))
-	}
+	if c.ImageUrl == "" {
+		if c.ImagePublisher == "" {
+			errs = packer.MultiErrorAppend(errs, fmt.Errorf("An image_publisher must be specified"))
+		}
 
-	if c.ImageOffer == "" {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A image_offer must be specified"))
-	}
+		if c.ImageOffer == "" {
+			errs = packer.MultiErrorAppend(errs, fmt.Errorf("An image_offer must be specified"))
+		}
 
-	if c.ImageSku == "" {
-		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A image_sku must be specified"))
+		if c.ImageSku == "" {
+			errs = packer.MultiErrorAppend(errs, fmt.Errorf("An image_sku must be specified"))
+		}
+	} else {
+		if c.ImagePublisher != "" || c.ImageOffer != "" || c.ImageSku != "" || c.ImageVersion != "" {
+			errs = packer.MultiErrorAppend(errs, fmt.Errorf("An image_url must not be specified if image_publisher, image_offer, image_sku, or image_version is specified"))
+		}
 	}
 
 	if c.Location == "" {
@@ -422,10 +494,25 @@ func assertRequiredParametersSet(c *Config, errs *packer.MultiError) {
 	if c.StorageAccount == "" {
 		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A storage_account must be specified"))
 	}
+	if c.ResourceGroupName == "" {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("A resource_group_name must be specified"))
+	}
+	if c.VirtualNetworkName == "" && c.VirtualNetworkResourceGroupName != "" {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("If virtual_network_resource_group_name is specified, so must virtual_network_name"))
+	}
+	if c.VirtualNetworkName == "" && c.VirtualNetworkSubnetName != "" {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("If virtual_network_subnet_name is specified, so must virtual_network_name"))
+	}
 
 	/////////////////////////////////////////////
 	// OS
-	if c.OSType != constants.Target_Linux && c.OSType != constants.Target_Windows {
+	if strings.EqualFold(c.OSType, constants.Target_Linux) {
+		c.OSType = constants.Target_Linux
+	} else if strings.EqualFold(c.OSType, constants.Target_Windows) {
+		c.OSType = constants.Target_Windows
+	} else if c.OSType == "" {
 		errs = packer.MultiErrorAppend(errs, fmt.Errorf("An os_type must be specified"))
+	} else {
+		errs = packer.MultiErrorAppend(errs, fmt.Errorf("The os_type %q is invalid", c.OSType))
 	}
 }

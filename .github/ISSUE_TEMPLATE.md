@@ -1,6 +1,7 @@
 **DELETE THIS TEMPLATE BEFORE SUBMITTING**
 
-_Only use Github issues to report bugs or feature requests, see https://www.packer.io/community/_
+_Only use Github issues to report bugs or feature requests, see
+https://www.packer.io/community.html_
 
 If you are planning to open a pull-request just open the pull-request instead of making an issue first.
 
@@ -12,7 +13,7 @@ FOR BUGS:
 
 Describe the problem and include the following information:
 
-- Packer Version
+- Packer version from `packer version`
 - Host platform
 - Debug log output from `PACKER_LOG=1 packer build template.json`.
   Please paste this in a gist https://gist.github.com

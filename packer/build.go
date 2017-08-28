@@ -28,6 +28,12 @@ const (
 	// force build is enabled.
 	ForceConfigKey = "packer_force"
 
+	// This key determines what to do when a normal multistep step fails
+	// - "cleanup" - run cleanup steps
+	// - "abort" - exit without cleanup
+	// - "ask" - ask the user
+	OnErrorConfigKey = "packer_on_error"
+
 	// TemplatePathKey is the path to the template that configured this build
 	TemplatePathKey = "packer_template_path"
 
@@ -54,7 +60,7 @@ type Build interface {
 	Run(Ui, Cache) ([]Artifact, error)
 
 	// Cancel will cancel a running build. This will block until the build
-	// is actually completely cancelled.
+	// is actually completely canceled.
 	Cancel()
 
 	// SetDebug will enable/disable debug mode. Debug mode is always
@@ -77,6 +83,12 @@ type Build interface {
 	// When SetForce is set to true, existing artifacts from the build are
 	// deleted prior to the build.
 	SetForce(bool)
+
+	// SetOnError will determine what to do when a normal multistep step fails
+	// - "cleanup" - run cleanup steps
+	// - "abort" - exit without cleanup
+	// - "ask" - ask the user
+	SetOnError(string)
 }
 
 // A build struct represents a single build job, the result of which should
@@ -97,6 +109,7 @@ type coreBuild struct {
 	debug         bool
 	dryRun        bool
 	force         bool
+	onError       string
 	l             sync.Mutex
 	prepareCalled bool
 }
@@ -141,6 +154,7 @@ func (b *coreBuild) Prepare() (warn []string, err error) {
 		DebugConfigKey:         b.debug,
 		DryRunConfigKey:        b.dryRun,
 		ForceConfigKey:         b.force,
+		OnErrorConfigKey:       b.onError,
 		TemplatePathKey:        b.templatePath,
 		UserVariablesConfigKey: b.variables,
 	}
@@ -208,8 +222,8 @@ func (b *coreBuild) Run(originalUi Ui, cache Cache) ([]Artifact, error) {
 	hook := &DispatchHook{Mapping: hooks}
 	artifacts := make([]Artifact, 0, 1)
 
-	// The builder just has a normal Ui, but targetted
-	builderUi := &TargettedUi{
+	// The builder just has a normal Ui, but targeted
+	builderUi := &TargetedUI{
 		Target: b.Name(),
 		Ui:     originalUi,
 	}
@@ -234,7 +248,7 @@ PostProcessorRunSeqLoop:
 	for _, ppSeq := range b.postProcessors {
 		priorArtifact := builderArtifact
 		for i, corePP := range ppSeq {
-			ppUi := &TargettedUi{
+			ppUi := &TargetedUI{
 				Target: fmt.Sprintf("%s (%s)", b.Name(), corePP.processorType),
 				Ui:     originalUi,
 			}
@@ -324,6 +338,14 @@ func (b *coreBuild) SetForce(val bool) {
 	}
 
 	b.force = val
+}
+
+func (b *coreBuild) SetOnError(val string) {
+	if b.prepareCalled {
+		panic("prepare has already been called")
+	}
+
+	b.onError = val
 }
 
 // Cancels the build if it is running.

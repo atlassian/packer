@@ -61,7 +61,11 @@ func (c *CLIConfig) CredentialsFromProfile(conf *aws.Config) (*credentials.Crede
 		return c.SourceCredentials, nil
 	}
 	srcCfg := aws.NewConfig().Copy(conf).WithCredentials(c.SourceCredentials)
-	svc := sts.New(session.New(), srcCfg)
+	session, err := session.NewSession(srcCfg)
+	if err != nil {
+		return nil, err
+	}
+	svc := sts.New(session)
 	res, err := svc.AssumeRole(c.AssumeRoleInput)
 	if err != nil {
 		return nil, err
@@ -86,10 +90,7 @@ func (c *CLIConfig) Prepare(name string) error {
 		c.SourceProfile = c.ProfileName
 	}
 	c.profileCred, err = credsFromName(c.SourceProfile)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 func (c *CLIConfig) getSessionName(rawName string) (string, error) {

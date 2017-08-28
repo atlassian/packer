@@ -1,12 +1,12 @@
 ---
-description: |
-    Packer strives to be stable and bug-free, but issues inevitably arise where
-    certain things may not work entirely correctly, or may not appear to work
-    correctly. In these cases, it is sometimes helpful to see more details about
-    what Packer is actually doing.
 layout: docs
-page_title: Debugging Packer
-...
+sidebar_current: docs-other-debugging
+page_title: Debugging - Other
+description: |-
+  Packer strives to be stable and bug-free, but issues inevitably arise where
+  certain things may not work entirely correctly, or may not appear to work
+  correctly.
+---
 
 # Debugging Packer Builds
 
@@ -22,8 +22,13 @@ continuing. This will allow you to inspect state and so on.
 In debug mode once the remote instance is instantiated, Packer will emit to the
 current directory an ephemeral private ssh key as a .pem file. Using that you
 can `ssh -i <key.pem>` into the remote build instance and see what is going on
-for debugging. The ephemeral key will be deleted at the end of the packer run
-during cleanup.
+for debugging. The key will only be emitted for cloud-based builders. The
+ephemeral key will be deleted at the end of the packer run during cleanup.
+
+For a local builder, the SSH session initiated will be visible in the detail
+provided when `PACKER_LOG=1` environment variable is set prior to a build,
+and you can connect to the local machine using the userid and password defined
+in the kickstart or preseed associated with initialzing the local VM.
 
 ### Windows
 
@@ -40,7 +45,7 @@ or may not appear to work correctly. In these cases, it is sometimes helpful to
 see more details about what Packer is actually doing.
 
 Packer has detailed logs which can be enabled by setting the `PACKER_LOG`
-environmental variable to any value like this
+environmental variable to any value but `""` (empty string) and `"0"` like this
 `PACKER_LOG=1 packer build <config.json>`. This will cause detailed logs to
 appear on stderr. The logs contain log messages from Packer as well as any
 plugins that are being used. Log messages from plugins are prefixed by their
@@ -61,8 +66,10 @@ In Windows you can set the detailed logs environmental variable `PACKER_LOG` or
 the log variable `PACKER_LOG_PATH` using powershell environment variables. For
 example:
 
-    $env:PACKER_LOG=1
-    $env:PACKER_LOG_PATH="packerlog.txt"
+```powershell
+$env:PACKER_LOG=1
+$env:PACKER_LOG_PATH="packerlog.txt"
+```
 
 If you find a bug with Packer, please include the detailed log by using a
 service such as [gist](https://gist.github.com).
@@ -73,8 +80,10 @@ Issues may arise using and building Ubuntu AMIs where common packages that
 *should* be installed from Ubuntu's Main repository are not found during a
 provisioner step:
 
-    amazon-ebs: No candidate version found for build-essential
-    amazon-ebs: No candidate version found for build-essential
+```
+amazon-ebs: No candidate version found for build-essential
+amazon-ebs: No candidate version found for build-essential
+```
 
 This, obviously can cause problems where a build is unable to finish
 successfully as the proper packages cannot be provisioned correctly. The problem
@@ -85,9 +94,41 @@ Adding the following provisioner to the packer template, allows for the
 cloud-init process to fully finish before packer starts provisioning the source
 AMI.
 
-    {
-      "type": "shell",
-      "inline": [
-        "while [ ! -f /var/lib/cloud/instance/boot-finished ]; do echo 'Waiting for cloud-init...'; sleep 1; done"
-      ]
-    }
+```json
+{
+  "type": "shell",
+  "inline": [
+    "while [ ! -f /var/lib/cloud/instance/boot-finished ]; do echo 'Waiting for cloud-init...'; sleep 1; done"
+  ]
+}
+```
+
+
+## Issues when using numerous Builders/Provisioners/Post-Processors
+
+Packer uses a separate process for each builder, provisioner, post-processor,
+and plugin. In certain cases, if you have too many of these, you can run out of
+[file descriptors](https://en.wikipedia.org/wiki/File_descriptor). This results
+in an error that might look like
+
+```text
+error initializing provisioner 'powershell': fork/exec /files/go/bin/packer:
+too many open files
+```
+
+On Unix systems, you can check what your file descriptor limit is with `ulimit
+-Sn`. You should check with your OS vendor on how to raise this limit.
+
+## Issues when using long temp directory
+
+Packer uses unix sockets internally, which are created inside the default
+directory for temporary files. Some operating systems place a limit on the
+length of the socket name, usually between 80 and 110 characters. If you get an
+error like this (for any builder, not just docker):
+
+```text
+Failed to initialize build 'docker': error initializing builder 'docker': plugin exited before we could connect
+```
+
+you should try setting your temp directory to something shorter. This can be
+done through the `TMPDIR` environment variable.
