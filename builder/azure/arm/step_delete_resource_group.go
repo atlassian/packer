@@ -1,15 +1,12 @@
-// Copyright (c) Microsoft Corporation. All rights reserved.
-// Licensed under the MIT License. See the LICENSE file in builder/azure for license information.
-
 package arm
 
 import (
 	"fmt"
 
+	"github.com/hashicorp/packer/builder/azure/common"
+	"github.com/hashicorp/packer/builder/azure/common/constants"
+	"github.com/hashicorp/packer/packer"
 	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/builder/azure/common"
-	"github.com/mitchellh/packer/builder/azure/common/constants"
-	"github.com/mitchellh/packer/packer"
 )
 
 type StepDeleteResourceGroup struct {
@@ -31,8 +28,12 @@ func NewStepDeleteResourceGroup(client *AzureClient, ui packer.Ui) *StepDeleteRe
 }
 
 func (s *StepDeleteResourceGroup) deleteResourceGroup(resourceGroupName string, cancelCh <-chan struct{}) error {
-	_, err := s.client.GroupsClient.Delete(resourceGroupName, cancelCh)
+	_, errChan := s.client.GroupsClient.Delete(resourceGroupName, cancelCh)
 
+	err := <-errChan
+	if err != nil {
+		s.say(s.client.LastError.Error())
+	}
 	return err
 }
 

@@ -1,14 +1,11 @@
-// Copyright (c) Microsoft Corporation. All rights reserved.
-// Licensed under the MIT License. See the LICENSE file in builder/azure for license information.
-
 package arm
 
 import (
 	"fmt"
 	"testing"
 
+	"github.com/hashicorp/packer/builder/azure/common/constants"
 	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/builder/azure/common/constants"
 )
 
 func TestStepDeleteOSDiskShouldFailIfGetFails(t *testing.T) {
@@ -108,6 +105,7 @@ func TestStepDeleteOSDiskShouldHandleComplexStorageContainerNames(t *testing.T) 
 func DeleteTestStateBagStepDeleteOSDisk(osDiskVhd string) multistep.StateBag {
 	stateBag := new(multistep.BasicStateBag)
 	stateBag.Put(constants.ArmOSDiskVhd, osDiskVhd)
+	stateBag.Put(constants.ArmIsManagedImage, false)
 
 	return stateBag
 }
